@@ -41,10 +41,10 @@ Requires Node.js 22.13 or later.
 
 Ask your agent to call `status`; it returns exactly these steps.
 
-1. Create (or pick) a Google Cloud project: https://console.cloud.google.com/projectcreate . If gcloud is installed, the `gcloud_setup` tool (CLI: `drivelift setup-gcloud --yes`) does steps 1-2 for you, showing the commands and asking for approval first. Steps 3-4 have no gcloud equivalent
+1. Create (or pick) a Google Cloud project: https://console.cloud.google.com/projectcreate . If gcloud is installed, the `gcloud_setup` tool does steps 1-2 for you: it shows the commands first and runs them after approval. On the CLI, `drivelift setup-gcloud` shows the plan and `--yes` runs it. Steps 3-4 have no gcloud equivalent
 2. Enable the Google Drive API: https://console.cloud.google.com/apis/library/drive.googleapis.com
 3. Configure the OAuth consent screen: https://console.cloud.google.com/auth/overview
-   - Google Workspace account: choose **Internal** (no review, tokens do not expire)
+   - Google Workspace account: choose **Internal** (no review, and no 7-day expiry of the Testing status)
    - Personal Gmail: choose **External** and **publish to Production**. In Testing status refresh tokens expire after 7 days
 4. Create an OAuth client of type **Desktop app** and download its JSON: https://console.cloud.google.com/auth/clients/create
 5. Put the JSON in place. When `status` finds a candidate in `~/Downloads` it returns a ready-made `mv … && chmod 600 …` command; run that. `import_client_secret` (CLI: `drivelift import-secret <path>`) does the same. Without a path it only lists candidates and copies nothing
@@ -57,7 +57,7 @@ From then on, just call `upload`. Calling `upload` while something is missing re
 | Tool | Purpose |
 |--|--|
 | `status` | Setup state (`no_client` / `no_token` / `token_invalid` / `api_disabled` / `ready`), next steps, Console URLs |
-| `auth_start` | Start sign-in: opens the browser and waits up to `wait_seconds` (default 90) for consent; returns `completed`, or `pending` if time runs out |
+| `auth_start` | Start sign-in: opens the browser and waits up to `wait_seconds` (default 45) for consent; returns `completed`, or `pending` if time runs out |
 | `auth_status` | Sign-in progress (`idle` / `pending` / `completed` / `failed`); `wait_seconds` blocks until it settles |
 | `import_client_secret` | Copy a downloaded client JSON into the config directory |
 | `gcloud_setup` | If gcloud is installed, do steps 1-2 (project and Drive API) on your behalf. Without `confirm` it only returns the commands it would run; `confirm: true` executes them, including `gcloud auth login` (opens a browser) when gcloud has no active account |
@@ -77,7 +77,7 @@ From then on, just call `upload`. Calling `upload` while something is missing re
 
 Sharing is meant to be set only when the user asks for it, and the tool description says so. `anyone` means anyone with the link, i.e. public; use it only when the user explicitly asks. A failed share does not undo the upload; each share's result comes back in `shared`.
 
-`auto` targets: xlsx, xls, csv, tsv, ods → Sheets; docx, doc, odt, rtf, txt, md, html → Docs; pptx, ppt, odp → Slides. Anything else is stored as-is.
+`auto` targets: xlsx, xlsm, xls, ods, csv, tsv → Sheets; docx, doc, odt, rtf, txt, md, html, htm → Docs; pptx, ppt, odp → Slides. Anything else is stored as-is. Conversion is Drive's own import; verified on a real account for xlsx and csv (Sheets) and md (Docs with headings and tables interpreted); the rest follows Drive's supported import formats.
 
 ## CLI
 
@@ -115,6 +115,8 @@ One person can create the OAuth client and hand the downloaded JSON to the team.
 - **Drive API quota is per project and shared by everyone.** Normal use does not come close
 
 ## Limitations
+
+- **Always-allowing `upload` also always-allows sharing.** With `share`, one call can grant access to any outside address or domain (since 0.2.0). If your host is set to always allow upload, a prompt injection could share files externally. Users who always-allowed it on 0.1.0 get 0.2.0 automatically via `drivelift@0`. If that worries you, set upload to ask every time
 
 - `folder_id` accepts any folder the signed-in account can edit, including folders drivelift did not create and folders in shared drives (confirmed on a shared drive, 2026-09-25). With `drive.file`, drivelift cannot see those folders' contents, so `folder_path` only reuses folders drivelift created; it makes its own folder even if a same-named one made by someone else exists
 - Existing files with the same name are not overwritten; a new file is created (Drive's default)

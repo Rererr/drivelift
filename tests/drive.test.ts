@@ -154,3 +154,34 @@ describe("validateShare / createPermission", () => {
     expect(calls[1]?.url).not.toContain("sendNotificationEmail");
   });
 });
+
+describe("ensureFolderPath の並行呼び出し", () => {
+  it("同じパスを同時に3回呼んでもフォルダは1つだけ作られる", async () => {
+    const folders: Array<{ id: string; name: string; parent: string }> = [];
+    const fetchImpl: FetchLike = async (input, init) => {
+      await new Promise((r) => setTimeout(r, 5));
+      if (init?.method === "POST") {
+        const b = JSON.parse(String(init.body)) as { name: string; parents: string[] };
+        const f = { id: `F${folders.length + 1}`, name: b.name, parent: b.parents[0] ?? "" };
+        folders.push(f);
+        return new Response(JSON.stringify({ id: f.id }));
+      }
+      const q = new URL(String(input)).searchParams.get("q") ?? "";
+      const hit = folders.find((f) => q.includes(`name='${f.name}'`) && q.includes(`'${f.parent}' in parents`));
+      return new Response(JSON.stringify({ files: hit ? [{ id: hit.id }] : [] }));
+    };
+    const results = await Promise.all([1, 2, 3].map(() => ensureFolderPath("t", "Reports/2026-09", undefined, fetchImpl)));
+    expect(folders.map((f) => f.name)).toEqual(["Reports", "2026-09"]);
+    expect(new Set(results.map((r) => r.id)).size).toBe(1);
+  });
+
+  it("共有ドライブ内でも見つけられるよう corpora=allDrives で検索する", async () => {
+    let url = "";
+    await ensureFolderPath("t", "A", "shared-folder", async (input) => {
+      url = String(input);
+      return new Response(JSON.stringify({ files: [{ id: "x" }] }));
+    });
+    expect(url).toContain("corpora=allDrives");
+    expect(url).toContain("orderBy=createdTime");
+  });
+});

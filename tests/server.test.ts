@@ -37,7 +37,7 @@ async function connectedClient(): Promise<Client> {
 }
 
 describe("server.ts", () => {
-  it("ツールは5個", async () => {
+  it("ツールは6個", async () => {
     const client = await connectedClient();
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(["auth_start", "auth_status", "gcloud_setup", "import_client_secret", "status", "upload"]);

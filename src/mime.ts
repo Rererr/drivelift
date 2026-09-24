@@ -66,6 +66,13 @@ const AUTO_TARGET: Readonly<Record<string, GoogleKind>> = {
   odp: "presentation",
 };
 
+/** 変換先ごとの拡張子一覧(ツール説明・README と表をずらさないため、ここから作る)。 */
+export function autoTargetSummary(): string {
+  const groups: Record<GoogleKind, string[]> = { spreadsheet: [], document: [], presentation: [] };
+  for (const [ext, kind] of Object.entries(AUTO_TARGET)) groups[kind].push(ext);
+  return `spreadsheets (${groups.spreadsheet.join("/")}) become Google Sheets, documents (${groups.document.join("/")}) become Google Docs, and slides (${groups.presentation.join("/")}) become Google Slides`;
+}
+
 export function extensionOf(filePath: string): string {
   return extname(filePath).replace(/^\./, "").toLowerCase();
 }

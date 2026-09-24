@@ -144,34 +144,46 @@ export function splitFolderPath(path: string): string[] {
  * parentId(省略時はマイドライブ直下)の下に folderPath のフォルダを順に探し、無ければ作る。末端のフォルダ ID を返す。
  * drive.file スコープでは drivelift が作ったフォルダしか検索に出ないので、「探す」は実質「以前 drivelift が作ったものを再利用する」になる。
  */
+/** 同じ親・同じ名前の「探す→無ければ作る」を同時に走らせない(並行 upload で同名フォルダが複数できるのを防ぐ)。同一プロセス内のみ有効。 */
+const inflightFolders = new Map<string, Promise<{ id: string; created: boolean }>>();
+
+async function findOrCreateFolder(accessToken: string, name: string, parent: string, fetchImpl: FetchLike): Promise<{ id: string; created: boolean }> {
+  const q = `mimeType='${FOLDER_MIME}' and name='${escapeQuery(name)}' and '${escapeQuery(parent)}' in parents and trashed=false`;
+  // 親が共有ドライブ内にあっても見つけられるよう corpora=allDrives。作成順で並べ、同名が複数あっても毎回同じもの(最古)を選ぶ
+  const list = await fetchImpl(`${API_BASE}/files?q=${encodeURIComponent(q)}&fields=files(id)&pageSize=1&orderBy=createdTime&corpora=allDrives&supportsAllDrives=true&includeItemsFromAllDrives=true`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!list.ok) throw new DriveRequestError(await failureOf(list));
+  const found = ((await list.json()) as { files?: Array<{ id?: string }> }).files?.[0]?.id;
+  if (found) return { id: found, created: false };
+  const res = await fetchImpl(`${API_BASE}/files?fields=id&supportsAllDrives=true`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json; charset=UTF-8" },
+    body: JSON.stringify({ name, mimeType: FOLDER_MIME, parents: [parent] }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) throw new DriveRequestError(await failureOf(res));
+  const id = ((await res.json()) as { id?: string }).id;
+  if (!id) throw new DriveliftError(`Drive created folder "${name}" but returned no id.`);
+  return { id, created: true };
+}
+
 export async function ensureFolderPath(accessToken: string, folderPath: string, parentId: string | undefined, fetchImpl: FetchLike): Promise<{ id: string; created: string[] }> {
   const parts = splitFolderPath(folderPath);
   if (parts.length === 0) throw new DriveliftError("folder_path is empty.");
   let parent = parentId ?? "root";
   const created: string[] = [];
   for (const name of parts) {
-    const q = `mimeType='${FOLDER_MIME}' and name='${escapeQuery(name)}' and '${escapeQuery(parent)}' in parents and trashed=false`;
-    const list = await fetchImpl(`${API_BASE}/files?q=${encodeURIComponent(q)}&fields=files(id)&pageSize=1&supportsAllDrives=true&includeItemsFromAllDrives=true`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!list.ok) throw new DriveRequestError(await failureOf(list));
-    const found = ((await list.json()) as { files?: Array<{ id?: string }> }).files?.[0]?.id;
-    if (found) {
-      parent = found;
-      continue;
+    const key = `${parent}\u0000${name}`;
+    let step = inflightFolders.get(key);
+    if (!step) {
+      step = findOrCreateFolder(accessToken, name, parent, fetchImpl).finally(() => inflightFolders.delete(key));
+      inflightFolders.set(key, step);
     }
-    const res = await fetchImpl(`${API_BASE}/files?fields=id&supportsAllDrives=true`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json; charset=UTF-8" },
-      body: JSON.stringify({ name, mimeType: FOLDER_MIME, parents: [parent] }),
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!res.ok) throw new DriveRequestError(await failureOf(res));
-    const id = ((await res.json()) as { id?: string }).id;
-    if (!id) throw new DriveliftError(`Drive created folder "${name}" but returned no id.`);
-    created.push(name);
-    parent = id;
+    const r = await step;
+    if (r.created) created.push(name);
+    parent = r.id;
   }
   return { id: parent, created };
 }
@@ -202,6 +214,8 @@ export function validateShare(spec: ShareSpec): void {
     throw new DriveliftError(`share target "${spec.target}" does not look like ${spec.type === "domain" ? "a domain name" : "an email address"}.`);
   }
 }
+
+export const MAX_SHARES = 20;
 
 export async function createPermission(accessToken: string, fileId: string, spec: ShareSpec, notify: boolean, fetchImpl: FetchLike): Promise<{ id: string }> {
   const body: Record<string, unknown> = { role: spec.role, type: spec.type };

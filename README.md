@@ -41,10 +41,10 @@ Node.js 22.13 以降が必要。
 
 エージェントに「drivelift の status を見て」と言えば、以下を返してくる。手順を自分で踏む場合は同じ内容。
 
-1. Google Cloud プロジェクトを作る（既存でも可）: https://console.cloud.google.com/projectcreate 。gcloud が入っていれば `gcloud_setup` ツール（CLI: `drivelift setup-gcloud --yes`）が手順 1・2 を代理実行する。実行前に打つコマンドを見せて承認を求める。手順 3・4 に gcloud の代替はない
+1. Google Cloud プロジェクトを作る（既存でも可）: https://console.cloud.google.com/projectcreate 。gcloud が入っていれば `gcloud_setup` ツールが手順 1・2 を代理実行する。ツールは打つコマンドを先に見せ、承認を得てから実行する。CLI では `drivelift setup-gcloud` で計画を表示し、`--yes` を付けると実行する。手順 3・4 に gcloud の代替はない
 2. Google Drive API を有効化: https://console.cloud.google.com/apis/library/drive.googleapis.com
 3. OAuth 同意画面を設定: https://console.cloud.google.com/auth/overview
-   - Google Workspace のアカウントなら **内部**（審査不要、トークン失効なし）
+   - Google Workspace のアカウントなら **内部**（審査不要。テスト状態の7日失効も起きない）
    - 個人 Gmail なら **外部** にして **本番に公開**する。テスト状態のままだとリフレッシュトークンが 7 日で失効する
 4. OAuth クライアントを **デスクトップ アプリ** 種別で作り、JSON をダウンロード: https://console.cloud.google.com/auth/clients/create
 5. JSON を所定の場所に置く。`status` が `~/Downloads` の候補を見つけると `mv … && chmod 600 …` のコマンドをそのまま返すので、それを実行すればよい。`import_client_secret` ツール（CLI: `drivelift import-secret <path>`）でも同じことができる。パスを省くと候補を列挙するだけで、コピーはしない
@@ -57,7 +57,7 @@ Node.js 22.13 以降が必要。
 | ツール | 役割 |
 |--|--|
 | `status` | 導入状態（`no_client` / `no_token` / `token_invalid` / `api_disabled` / `ready`）と次の一手、Console の URL |
-| `auth_start` | ログイン開始。ブラウザを開き、同意が終わるまで最大 `wait_seconds`（既定 90 秒）待って `completed` を返す。間に合わなければ `pending` |
+| `auth_start` | ログイン開始。ブラウザを開き、同意が終わるまで最大 `wait_seconds`（既定 45 秒）待って `completed` を返す。間に合わなければ `pending` |
 | `auth_status` | ログインの進捗（`idle` / `pending` / `completed` / `failed`）。`wait_seconds` で決着まで待てる |
 | `import_client_secret` | ダウンロード済みのクライアント JSON を設定ディレクトリへ取り込む |
 | `gcloud_setup` | gcloud が入っていれば手順 1・2（プロジェクト用意と Drive API 有効化）を代理実行。`confirm` なしは打つコマンドを返すだけで、`confirm: true` で実行。gcloud 未ログインなら `gcloud auth login` も代行（ブラウザが開く） |
@@ -77,7 +77,7 @@ Node.js 22.13 以降が必要。
 
 共有は、利用者が指示したときだけ付ける前提で、ツールの説明にもそう書いてある。`anyone` は「リンクを知っている全員」になり外部公開と同じなので、利用者が明示したときだけ使う。共有の一部が失敗してもアップロードは取り消さず、結果の `shared` に1件ずつ成否を返す。
 
-`auto` の変換先: xlsx・xls・csv・tsv・ods → スプレッドシート、docx・doc・odt・rtf・txt・md・html → ドキュメント、pptx・ppt・odp → スライド。それ以外はそのまま置く。
+`auto` の変換先: xlsx・xlsm・xls・ods・csv・tsv → スプレッドシート、docx・doc・odt・rtf・txt・md・html・htm → ドキュメント、pptx・ppt・odp → スライド。それ以外はそのまま置く。変換は Drive のインポート機能が行う。実機で確認したのは xlsx・csv（スプレッドシート）と md（見出しや表を解釈したドキュメント）で、ほかは Drive の対応形式に従う。
 
 ## CLI
 
@@ -115,6 +115,8 @@ drivelift upload <file> [--folder ID] [--folder-path A/B] [--name N] [--convert 
 - **Drive API の上限はプロジェクト単位で全員が共有する。** 通常の利用で問題になる量ではない
 
 ## 制約と注意
+
+- **`upload` を常時許可すると、共有も常時許可したことになる。** `share` を使えば、1回の呼び出しで任意の外部アドレスやドメインに権限を付けられる（0.2.0 から）。ホストのツール許可で upload を「常に許可」にしている場合、プロンプトインジェクションでファイルを外部に共有される余地がある。0.1.0 で常に許可した人も、`drivelift@0` を指定していれば自動で 0.2.0 に上がる。気になる場合は upload を毎回確認する設定にする
 
 - `folder_id` には、ログインしたアカウントが編集できるフォルダなら何でも指定できる。drivelift が作っていないフォルダや共有ドライブ内のフォルダでもよい（2026-09-25 に共有ドライブで確認）。ただし drive.file の権限では、そのフォルダの中身は見えない。そのため `folder_path` で再利用できるのは drivelift が作ったフォルダだけで、他の人や手で作った同名フォルダがあっても、別に同名のフォルダを作る
 - 同名ファイルがあっても上書きせず、新しいファイルを作る（Drive の既定どおり）

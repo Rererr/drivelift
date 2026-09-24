@@ -109,7 +109,13 @@ function failed(cmd: string[], r: ExecResult): never {
   throw new DriveliftError(`\`${quote(cmd)}\` failed (exit ${r.code}): ${(r.stderr || r.stdout).trim().slice(0, 500)}`);
 }
 
+/** Google のプロジェクト ID の規則。gcloud の引数へ渡す前に必ず通す(先頭 "-" でオプションとして解釈させない)。 */
+export const PROJECT_ID_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
+
 export async function runGcloudSetup(input: GcloudSetupInput, deps: { exec: ExecGcloud; hasGcloud: () => boolean; secretPath: string }): Promise<GcloudSetupResult> {
+  if (input.project_id !== undefined && !PROJECT_ID_PATTERN.test(input.project_id)) {
+    throw new DriveliftError(`Invalid project_id "${input.project_id}": use 6-30 lowercase letters, digits or hyphens, starting with a letter and not ending with a hyphen.`);
+  }
   const base = (): Pick<GcloudSetupResult, "account" | "project_id" | "planned_commands" | "executed_commands" | "urls"> => ({ account: null, project_id: null, planned_commands: [], executed_commands: [], urls: {} });
   if (!deps.hasGcloud()) {
     return {
@@ -157,7 +163,7 @@ export async function runGcloudSetup(input: GcloudSetupInput, deps: { exec: Exec
   if (input.project_id) {
     projectId = input.project_id;
     exists = await projectExists(deps.exec, projectId);
-  } else if (configured && (await projectExists(deps.exec, configured))) {
+  } else if (configured && PROJECT_ID_PATTERN.test(configured) && (await projectExists(deps.exec, configured))) {
     projectId = configured;
     exists = true;
   } else {

@@ -19,7 +19,7 @@ import {
   saveClientSecret,
   type ClientCredentials,
 } from "./config.js";
-import { createPermission, DriveRequestError, driveAbout, ensureFolderPath, uploadToDrive, validateShare, type DriveFailure, type FetchLike, type ShareSpec } from "./drive.js";
+import { createPermission, DriveRequestError, driveAbout, ensureFolderPath, MAX_SHARES, uploadToDrive, validateShare, type DriveFailure, type FetchLike, type ShareSpec } from "./drive.js";
 import { defaultExecGcloud, runGcloudSetup, type ExecGcloud, type GcloudSetupInput, type GcloudSetupResult } from "./gcloud.js";
 import { DriveliftError } from "./errors.js";
 import { CONVERT_MODES, defaultDriveName, extensionOf, resolveTargetMime, sourceMimeFor, type ConvertMode } from "./mime.js";
@@ -155,7 +155,8 @@ function waitForOutcome(entry: PendingLogin, waitMs: number): Promise<LoginOutco
   });
 }
 
-export const DEFAULT_AUTH_WAIT_SECONDS = 90;
+/** 多くの MCP クライアントのリクエスト既定タイムアウト(公式 SDK は 60 秒)に収まる長さにする。 */
+export const DEFAULT_AUTH_WAIT_SECONDS = 45;
 export const MAX_AUTH_WAIT_SECONDS = 600;
 
 function clampWait(seconds: number | undefined, fallback: number): number {
@@ -178,7 +179,7 @@ export async function handleAuthStart(deps: Deps, input: { open_browser?: boolea
     },
   );
   const browserOpened = input.open_browser === false ? false : await deps.openBrowser(session.url);
-  // ブラウザでの同意が終わるまでここで待つ(既定 90 秒)。利用者が「終わった」と言わなくても完了が返る
+  // ブラウザでの同意が終わるまでここで待つ(既定 45 秒)。利用者が「終わった」と言わなくても完了が返る
   const outcome = await waitForOutcome(entry, clampWait(input.wait_seconds, DEFAULT_AUTH_WAIT_SECONDS) * 1000);
   const base = { url: session.url, browser_opened: browserOpened, expires_in_seconds: Math.round(deps.loginTimeoutMs / 1000) };
   switch (outcome.kind) {
@@ -239,6 +240,8 @@ export function handleImportClientSecret(deps: Deps, input: { path?: string } = 
   if (input.path) {
     const path = resolveUserPath(input.path);
     if (!existsSync(path)) throw new DriveliftError(`File not found: ${path}`);
+    // FIFO や /dev/zero を同期読みするとイベントループごと止まるので、通常ファイル以外は読まない
+    if (!statSync(path).isFile()) throw new DriveliftError(`Not a regular file: ${path}`);
     const { path: savedTo, tokenCleared } = saveClientSecret(deps.configDir, readFileSync(path, "utf-8"));
     return { imported: true, saved_to: savedTo, next: tokenCleared ? "The OAuth client changed, so the previous sign-in was discarded. Call auth_start to sign in with the new client." : "Call auth_start to sign in." };
   }
@@ -293,7 +296,10 @@ export async function handleUpload(deps: Deps, input: UploadInput): Promise<Uplo
   if (!existsSync(filePath)) throw new DriveliftError(`File not found: ${filePath}`);
   if (!statSync(filePath).isFile()) throw new DriveliftError(`Not a regular file: ${filePath}`);
 
-  // 共有指定の誤りは何も作る前に弾く(アップロード後に失敗すると中途半端な状態が残る)
+  // 指定の誤りは何も作る前に弾く(アップロード後に失敗すると中途半端な状態が残る)
+  if (input.folder_id !== undefined && input.folder_id.trim() === "") throw new DriveliftError("folder_id is empty. Omit it to upload to My Drive root.");
+  if (input.folder_path !== undefined && input.folder_path.trim() === "") throw new DriveliftError("folder_path is empty. Omit it, or give a path like Reports/2026-09.");
+  if ((input.share?.length ?? 0) > MAX_SHARES) throw new DriveliftError(`share accepts at most ${MAX_SHARES} entries.`);
   for (const spec of input.share ?? []) validateShare(spec);
 
   const creds = requireCreds(deps);
@@ -303,9 +309,9 @@ export async function handleUpload(deps: Deps, input: UploadInput): Promise<Uplo
   const ext = extensionOf(filePath);
   const targetMime = resolveTargetMime(ext, convert);
   const name = input.name ?? defaultDriveName(filePath, targetMime !== null);
+  let foldersCreated: string[] = [];
   try {
     let folderId = input.folder_id;
-    let foldersCreated: string[] = [];
     if (input.folder_path) {
       const folder = await ensureFolderPath(access.accessToken, input.folder_path, input.folder_id, deps.fetchImpl);
       folderId = folder.id;
@@ -322,12 +328,14 @@ export async function handleUpload(deps: Deps, input: UploadInput): Promise<Uplo
     });
     // 共有はファイルができた後なので、1件の失敗で全体を失敗にしない(ファイルは残る)。件ごとの成否を返す
     const shared: ShareOutcome[] = [];
+    // 大きいファイルの送信中に access_token が切れていることがあるので、共有の前に取り直す(期限内ならキャッシュが返る)
+    const shareToken = (input.share?.length ?? 0) > 0 ? ((await getAccessToken(creds, deps.configDir, deps.fetchImpl, deps.now))?.accessToken ?? access.accessToken) : access.accessToken;
     for (const spec of input.share ?? []) {
       try {
-        await createPermission(access.accessToken, file.id, spec, input.notify ?? false, deps.fetchImpl);
+        await createPermission(shareToken, file.id, spec, input.notify ?? false, deps.fetchImpl);
         shared.push({ role: spec.role, type: spec.type, target: spec.target ?? null, ok: true });
       } catch (error) {
-        shared.push({ role: spec.role, type: spec.type, target: spec.target ?? null, ok: false, error: error instanceof DriveRequestError && error.failure.kind !== "other" ? `${error.failure.kind}` : error instanceof Error ? error.message : String(error) });
+        shared.push({ role: spec.role, type: spec.type, target: spec.target ?? null, ok: false, error: error instanceof DriveRequestError && error.failure.kind !== "other" && error.failure.kind !== "api_disabled" ? `${error.failure.kind}: ${error.failure.message}` : error instanceof Error ? error.message : String(error) });
       }
     }
     return {
@@ -342,11 +350,22 @@ export async function handleUpload(deps: Deps, input: UploadInput): Promise<Uplo
       shared,
     };
   } catch (error) {
-    if (error instanceof DriveRequestError) {
-      const status = statusFromDriveFailure(deps, error.failure);
-      if (status) throw new DriveliftError(error.message, status);
-      if (error.failure.kind === "not_found") throw new DriveliftError(`Drive returned 404 (${error.failure.message}). If you passed folder_id: check that the ID is right (the part after /folders/ in the folder URL) and that the signed-in account can edit that folder. drivelift can create files in any folder the account can edit, even though it cannot list that folder's contents.`);
+    // フォルダを作った後で失敗しても、作ったフォルダは残る。利用者が掃除できるよう伝える
+    const leftover = foldersCreated.length > 0 ? ` (folders already created before the failure: ${foldersCreated.join("/")})` : "";
+    try {
+      rethrowUploadError(deps, error);
+    } catch (e) {
+      if (leftover && e instanceof DriveliftError) throw new DriveliftError(`${e.message}${leftover}`, e.status);
+      throw e;
     }
-    throw error;
   }
+}
+
+function rethrowUploadError(deps: Deps, error: unknown): never {
+  if (error instanceof DriveRequestError) {
+    const status = statusFromDriveFailure(deps, error.failure);
+    if (status) throw new DriveliftError(error.message, status);
+    if (error.failure.kind === "not_found") throw new DriveliftError(`Drive returned 404 (${error.failure.message}). If you passed folder_id: check that the ID is right (the part after /folders/ in the folder URL) and that the signed-in account can edit that folder. drivelift can create files in any folder the account can edit, even though it cannot list that folder's contents.`);
+  }
+  throw error;
 }

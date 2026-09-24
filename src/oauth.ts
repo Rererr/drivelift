@@ -110,7 +110,14 @@ export async function startLoginSession(opts: StartLoginOptions): Promise<LoginS
 
   const port = await new Promise<number>((resolve, reject) => {
     server = createServer((req, res) => {
-      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      let url: URL;
+      try {
+        url = new URL(req.url ?? "/", "http://127.0.0.1");
+      } catch {
+        // 壊れたリクエスト行(ブラウザからは送れない形)で待ち受けごとプロセスを落とさない
+        res.writeHead(400).end();
+        return;
+      }
       if (url.pathname !== "/callback") {
         res.writeHead(404).end();
         return;

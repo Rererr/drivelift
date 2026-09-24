@@ -106,6 +106,12 @@ describe("runGcloudSetup", () => {
     await expect(runGcloudSetup({ project_id: "p-denied-1", confirm: true }, deps(exec))).rejects.toBeInstanceOf(DriveliftError);
   });
 
+  it("project_id は gcloud に渡す前に検証し、オプションに見える値を通さない", async () => {
+    const { exec, calls } = fakeGcloud({ account: "me@example.com", project: null, existing: [], enabled: [] });
+    await expect(runGcloudSetup({ project_id: "--impersonate-service-account=x" }, deps(exec))).rejects.toThrow(/Invalid project_id/);
+    expect(calls).toHaveLength(0);
+  });
+
   it("生成 ID は Google の制約(先頭英字・6-30 文字・小文字)を満たす", () => {
     expect(generateProjectId()).toMatch(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/);
   });

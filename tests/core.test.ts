@@ -184,6 +184,31 @@ describe("handleUpload", () => {
     ]);
   });
 
+  it("空の folder_id / folder_path と 21 件以上の share は何も呼ばずに弾く", async () => {
+    saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+    const file = join(dir, "r.csv");
+    writeFileSync(file, "a,b");
+    const deps = makeDeps(dir, ENV_CREDS, () => undefined);
+    await expect(handleUpload(deps, { path: file, folder_id: " " })).rejects.toThrow(/folder_id is empty/);
+    await expect(handleUpload(deps, { path: file, folder_path: "" })).rejects.toThrow(/folder_path is empty/);
+    const many = Array.from({ length: 21 }, (_, i) => ({ role: "reader" as const, type: "user" as const, target: `u${i}@example.com` }));
+    await expect(handleUpload(deps, { path: file, share: many })).rejects.toThrow(/at most 20/);
+    expect(deps.calls).toHaveLength(0);
+  });
+
+  it("フォルダを作った後に upload が失敗したら、作ったフォルダをエラーに含める", async () => {
+    saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+    const file = join(dir, "r.csv");
+    writeFileSync(file, "a,b");
+    const deps = makeDeps(dir, ENV_CREDS, (url) => {
+      if (url.includes("/drive/v3/files?q=")) return new Response(JSON.stringify({ files: [] }));
+      if (url.includes("/drive/v3/files?fields=id")) return new Response(JSON.stringify({ id: "fold-1" }));
+      if (url.includes("/upload/")) return new Response(JSON.stringify({ error: { message: "boom" } }), { status: 500 });
+      return undefined;
+    });
+    await expect(handleUpload(deps, { path: file, folder_path: "Left/Over" })).rejects.toThrow(/Left\/Over/);
+  });
+
   it("共有指定が不正なら何も作らずに失敗する", async () => {
     saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
     const file = join(dir, "r.csv");
@@ -225,6 +250,10 @@ describe("handleImportClientSecret", () => {
     expect(listed.imported).toBe(false);
     if (!listed.imported) expect(Array.isArray(listed.candidates)).toBe(true);
     expect(existsSync(clientSecretPath(join(dir, "cfg2")))).toBe(false);
+  });
+
+  it("通常ファイル以外(ディレクトリ等)は読まずに弾く", () => {
+    expect(() => handleImportClientSecret(makeDeps(dir, {}, () => undefined), { path: dir })).toThrow(/Not a regular file/);
   });
 
   it("Web 種別の JSON は取り込まない", () => {

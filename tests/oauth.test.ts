@@ -131,6 +131,21 @@ describe("startLoginSession", () => {
     expect(tokenCalls).toBe(1);
   });
 
+  it("壊れたリクエスト行でもプロセスを落とさず待ち続ける", async () => {
+    const { fetchImpl } = googleFetch();
+    const session = await startLoginSession({ creds, configDir: dir, fetchImpl, now: () => NOW, timeoutMs: 5_000 });
+    const { connect } = await import("node:net");
+    await new Promise<void>((resolve) => {
+      const sock = connect(session.port, "127.0.0.1", () => sock.write("GET http://[/callback HTTP/1.1\r\nHost: x\r\n\r\n"));
+      sock.on("data", () => sock.end());
+      sock.on("close", () => resolve());
+      sock.on("error", () => resolve());
+    });
+    const state = new URL(session.url).searchParams.get("state");
+    await fetch(`http://127.0.0.1:${session.port}/callback?code=C&state=${state}`);
+    await expect(session.done).resolves.toEqual({ account: "me@example.com" });
+  });
+
   it("refresh_token が返らない交換は失敗として扱う", async () => {
     const { fetchImpl } = googleFetch({ token: () => new Response(JSON.stringify({ access_token: "acc", expires_in: 10 }), { status: 200 }) });
     const session = await startLoginSession({ creds, configDir: dir, fetchImpl, now: () => NOW, timeoutMs: 5_000 });

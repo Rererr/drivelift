@@ -8,9 +8,14 @@
  *   drivelift login                 ブラウザで Google ログイン(完了まで待つ)
  *   drivelift import-secret [path]  client_secret JSON を取り込む(省略時は ~/Downloads の候補を列挙)
  *   drivelift setup-gcloud [--project ID] [--yes]  gcloud で手順 1-2 を実行(--yes なしは計画表示)
- *   drivelift upload <file> [--folder ID] [--name N] [--convert MODE] [--json]
+ *   drivelift upload <file> [--folder ID] [--folder-path A/B] [--name N] [--convert MODE]
+ *                    [--share ROLE:TYPE[:TARGET]]... [--notify] [--json]
+ *
+ * 終了コード: 0 成功 / 1 実行時エラー / 2 使い方の誤り・未導入(doctor) / 3 アップロードは成功したが共有の一部が失敗
  *                                アップロードして URL を出力(--json で全項目)
  */
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { defaultDeps, handleAuthStart, handleGcloudSetup, handleImportClientSecret, handleStatus, handleUpload, waitForLogin } from "./core.js";
 import { DriveliftError } from "./errors.js";
@@ -42,13 +47,20 @@ Usage:
   drivelift --help | --version
 `;
 
-function parseUploadArgs(args: string[]): ReturnType<typeof parseUploadArgsRaw> {
+/** 使い方の誤り。終了コード 2 にする。 */
+class UsageError extends DriveliftError {}
+
+/** parseArgs は未知のオプション等で TypeError を投げる。利用者向けの UsageError に直す。 */
+function parseOrUsage<T>(fn: () => T): T {
   try {
-    return parseUploadArgsRaw(args);
+    return fn();
   } catch (error) {
-    // parseArgs は未知のオプション等で TypeError を投げる。利用者向けの文言に直す
-    throw new DriveliftError(`${error instanceof Error ? error.message : String(error)}\n\n${USAGE}`);
+    throw new UsageError(`${error instanceof Error ? error.message : String(error)}\n\n${USAGE}`);
   }
+}
+
+function parseUploadArgs(args: string[]): ReturnType<typeof parseUploadArgsRaw> {
+  return parseOrUsage(() => parseUploadArgsRaw(args));
 }
 
 function parseUploadArgsRaw(args: string[]) {
@@ -71,7 +83,7 @@ function parseUploadArgsRaw(args: string[]) {
 export function parseShareArg(arg: string): ShareSpec {
   const [role, type, ...rest] = arg.split(":");
   const target = rest.join(":");
-  if (!role || !type) throw new DriveliftError(`--share must be role:type[:target] (got "${arg}").`);
+  if (!role || !type) throw new UsageError(`--share must be role:type[:target] (got "${arg}").`);
   return { role: role as ShareSpec["role"], type: type as ShareSpec["type"], ...(target ? { target } : {}) };
 }
 
@@ -142,7 +154,7 @@ export async function main(argv: string[]): Promise<number> {
         return 2;
       }
       case "setup-gcloud": {
-        const { values } = parseArgs({ args: rest, options: { project: { type: "string" }, yes: { type: "boolean", default: false } } });
+        const { values } = parseOrUsage(() => parseArgs({ args: rest, options: { project: { type: "string" }, yes: { type: "boolean", default: false } } }));
         const result = await handleGcloudSetup(deps, { ...(values.project === undefined ? {} : { project_id: values.project }), confirm: values.yes });
         process.stdout.write(`${result.message}\n`);
         if (result.state === "plan" || result.state === "needs_login") {
@@ -157,6 +169,10 @@ export async function main(argv: string[]): Promise<number> {
         return result.state === "done" || (result.state === "plan" && result.planned_commands.length === 0) ? 0 : 2;
       }
       case "upload": {
+        if (rest.includes("--help") || rest.includes("-h")) {
+          process.stdout.write(USAGE);
+          return 0;
+        }
         const { values, positionals } = parseUploadArgs(rest);
         const file = positionals[0];
         if (!file) {
@@ -164,7 +180,7 @@ export async function main(argv: string[]): Promise<number> {
           return 2;
         }
         if (values.convert !== undefined && !(CONVERT_MODES as readonly string[]).includes(values.convert)) {
-          throw new DriveliftError(`--convert must be one of ${CONVERT_MODES.join(", ")}.`);
+          throw new UsageError(`--convert must be one of ${CONVERT_MODES.join(", ")}.`);
         }
         const share = (values.share ?? []).map(parseShareArg);
         const result = await handleUpload(deps, {
@@ -187,11 +203,15 @@ export async function main(argv: string[]): Promise<number> {
     }
   } catch (error) {
     printError(error);
-    return 1;
+    return error instanceof UsageError ? 2 : 1;
   }
 }
 
-main(process.argv.slice(2)).then(
+function isDirectlyExecuted(): boolean {
+  return typeof process.argv[1] === "string" && fileURLToPath(import.meta.url) === realpathSync(process.argv[1]);
+}
+
+if (isDirectlyExecuted()) main(process.argv.slice(2)).then(
   (code) => {
     // serve は常駐なので exit しない(runServer は接続後に戻る)
     if (process.argv[2] !== undefined && process.argv[2] !== "serve") process.exit(code);
