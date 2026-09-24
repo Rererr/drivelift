@@ -21,7 +21,7 @@ import {
 } from "./config.js";
 import { createPermission, DriveRequestError, driveAbout, ensureFolderPath, MAX_SHARES, uploadToDrive, validateShare, type DriveFailure, type FetchLike, type ShareSpec } from "./drive.js";
 import { defaultExecGcloud, runGcloudSetup, type ExecGcloud, type GcloudSetupInput, type GcloudSetupResult } from "./gcloud.js";
-import { DriveliftError } from "./errors.js";
+import { DriveliftError, DriveliftInputError } from "./errors.js";
 import { CONVERT_MODES, defaultDriveName, extensionOf, resolveTargetMime, sourceMimeFor, type ConvertMode } from "./mime.js";
 import { getAccessToken, startLoginSession, type LoginSession } from "./oauth.js";
 import { apiDisabledStatus, noClientStatus, noTokenStatus, readyStatus, tokenInvalidStatus, type Status } from "./status.js";
@@ -291,15 +291,15 @@ export interface UploadResult {
 
 export async function handleUpload(deps: Deps, input: UploadInput): Promise<UploadResult> {
   const convert = input.convert ?? "auto";
-  if (!CONVERT_MODES.includes(convert)) throw new DriveliftError(`convert must be one of ${CONVERT_MODES.join(", ")}.`);
+  if (!CONVERT_MODES.includes(convert)) throw new DriveliftInputError(`convert must be one of ${CONVERT_MODES.join(", ")}.`);
   const filePath = resolveUserPath(input.path);
   if (!existsSync(filePath)) throw new DriveliftError(`File not found: ${filePath}`);
   if (!statSync(filePath).isFile()) throw new DriveliftError(`Not a regular file: ${filePath}`);
 
   // 指定の誤りは何も作る前に弾く(アップロード後に失敗すると中途半端な状態が残る)
-  if (input.folder_id !== undefined && input.folder_id.trim() === "") throw new DriveliftError("folder_id is empty. Omit it to upload to My Drive root.");
-  if (input.folder_path !== undefined && input.folder_path.trim() === "") throw new DriveliftError("folder_path is empty. Omit it, or give a path like Reports/2026-09.");
-  if ((input.share?.length ?? 0) > MAX_SHARES) throw new DriveliftError(`share accepts at most ${MAX_SHARES} entries.`);
+  if (input.folder_id !== undefined && input.folder_id.trim() === "") throw new DriveliftInputError("folder_id is empty. Omit it to upload to My Drive root.");
+  if (input.folder_path !== undefined && input.folder_path.trim() === "") throw new DriveliftInputError("folder_path is empty. Omit it, or give a path like Reports/2026-09.");
+  if ((input.share?.length ?? 0) > MAX_SHARES) throw new DriveliftInputError(`share accepts at most ${MAX_SHARES} entries.`);
   for (const spec of input.share ?? []) validateShare(spec);
 
   const creds = requireCreds(deps);
@@ -313,9 +313,8 @@ export async function handleUpload(deps: Deps, input: UploadInput): Promise<Uplo
   try {
     let folderId = input.folder_id;
     if (input.folder_path) {
-      const folder = await ensureFolderPath(access.accessToken, input.folder_path, input.folder_id, deps.fetchImpl);
+      const folder = await ensureFolderPath(access.accessToken, input.folder_path, input.folder_id, deps.fetchImpl, (name) => foldersCreated.push(name));
       folderId = folder.id;
-      foldersCreated = folder.created;
     }
     const file = await uploadToDrive({
       accessToken: access.accessToken,
@@ -329,8 +328,23 @@ export async function handleUpload(deps: Deps, input: UploadInput): Promise<Uplo
     // 共有はファイルができた後なので、1件の失敗で全体を失敗にしない(ファイルは残る)。件ごとの成否を返す
     const shared: ShareOutcome[] = [];
     // 大きいファイルの送信中に access_token が切れていることがあるので、共有の前に取り直す(期限内ならキャッシュが返る)
-    const shareToken = (input.share?.length ?? 0) > 0 ? ((await getAccessToken(creds, deps.configDir, deps.fetchImpl, deps.now))?.accessToken ?? access.accessToken) : access.accessToken;
+    // 取り直しに失敗しても、ファイルはもうできているので呼び出し全体は失敗にしない(再試行で二重アップロードになる)。各共有の失敗として返す
+    let shareToken: string | null = access.accessToken;
+    let tokenError: string | null = null;
+    if ((input.share?.length ?? 0) > 0) {
+      try {
+        shareToken = (await getAccessToken(creds, deps.configDir, deps.fetchImpl, deps.now))?.accessToken ?? null;
+        if (!shareToken) tokenError = "not signed in";
+      } catch (error) {
+        shareToken = null;
+        tokenError = `could not refresh the access token before sharing: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
     for (const spec of input.share ?? []) {
+      if (!shareToken) {
+        shared.push({ role: spec.role, type: spec.type, target: spec.target ?? null, ok: false, error: tokenError ?? "no access token" });
+        continue;
+      }
       try {
         await createPermission(shareToken, file.id, spec, input.notify ?? false, deps.fetchImpl);
         shared.push({ role: spec.role, type: spec.type, target: spec.target ?? null, ok: true });
@@ -355,8 +369,10 @@ export async function handleUpload(deps: Deps, input: UploadInput): Promise<Uplo
     try {
       rethrowUploadError(deps, error);
     } catch (e) {
-      if (leftover && e instanceof DriveliftError) throw new DriveliftError(`${e.message}${leftover}`, e.status);
-      throw e;
+      if (!leftover) throw e;
+      if (e instanceof DriveliftError) throw new DriveliftError(`${e.message}${leftover}`, e.status);
+      // タイムアウト(DOMException)やネットワーク断(TypeError)でも、作ったフォルダは伝える
+      throw new DriveliftError(`${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}${leftover}`);
     }
   }
 }

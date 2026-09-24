@@ -11,7 +11,7 @@
  */
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { DriveliftError } from "./errors.js";
+import { DriveliftError, DriveliftInputError } from "./errors.js";
 import { CONSOLE_URLS, consoleForm, consoleSteps, type ConsoleForm } from "./status.js";
 
 export interface ExecResult {
@@ -114,7 +114,7 @@ export const PROJECT_ID_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 
 export async function runGcloudSetup(input: GcloudSetupInput, deps: { exec: ExecGcloud; hasGcloud: () => boolean; secretPath: string }): Promise<GcloudSetupResult> {
   if (input.project_id !== undefined && !PROJECT_ID_PATTERN.test(input.project_id)) {
-    throw new DriveliftError(`Invalid project_id "${input.project_id}": use 6-30 lowercase letters, digits or hyphens, starting with a letter and not ending with a hyphen.`);
+    throw new DriveliftInputError(`Invalid project_id "${input.project_id}": use 6-30 lowercase letters, digits or hyphens, starting with a letter and not ending with a hyphen.`);
   }
   const base = (): Pick<GcloudSetupResult, "account" | "project_id" | "planned_commands" | "executed_commands" | "urls"> => ({ account: null, project_id: null, planned_commands: [], executed_commands: [], urls: {} });
   if (!deps.hasGcloud()) {
@@ -169,7 +169,11 @@ export async function runGcloudSetup(input: GcloudSetupInput, deps: { exec: Exec
   } else {
     projectId = generateProjectId();
     exists = false;
-    if (configured) note = ` gcloud's configured project "${configured}" is not accessible from this account, so a new project ID was generated (pass project_id to choose one).`;
+    if (configured) {
+      note = PROJECT_ID_PATTERN.test(configured)
+        ? ` gcloud's configured project "${configured}" is not accessible from this account, so a new project ID was generated (pass project_id to choose one).`
+        : ` gcloud's configured project "${configured}" has a legacy or unsupported ID format that drivelift does not pass to gcloud, so a new project ID was generated (pass project_id to choose one).`;
+    }
   }
   const enabled = exists ? await driveApiEnabled(deps.exec, projectId) : false;
 

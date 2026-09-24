@@ -8,7 +8,7 @@
  *   上位が Status(次の一手)に変換できるようにする
  */
 import { readFileSync } from "node:fs";
-import { DriveliftError } from "./errors.js";
+import { DriveliftError, DriveliftInputError } from "./errors.js";
 
 export type FetchLike = typeof fetch;
 
@@ -147,15 +147,35 @@ export function splitFolderPath(path: string): string[] {
 /** 同じ親・同じ名前の「探す→無ければ作る」を同時に走らせない(並行 upload で同名フォルダが複数できるのを防ぐ)。同一プロセス内のみ有効。 */
 const inflightFolders = new Map<string, Promise<{ id: string; created: boolean }>>();
 
-async function findOrCreateFolder(accessToken: string, name: string, parent: string, fetchImpl: FetchLike): Promise<{ id: string; created: boolean }> {
+/** 同名フォルダを全ページ探し、最も古いものを返す。drive.file では自分が作ったものしか出ないので件数は小さい。 */
+async function findFolder(accessToken: string, name: string, parent: string, fetchImpl: FetchLike): Promise<string | null> {
   const q = `mimeType='${FOLDER_MIME}' and name='${escapeQuery(name)}' and '${escapeQuery(parent)}' in parents and trashed=false`;
-  // 親が共有ドライブ内にあっても見つけられるよう corpora=allDrives。作成順で並べ、同名が複数あっても毎回同じもの(最古)を選ぶ
-  const list = await fetchImpl(`${API_BASE}/files?q=${encodeURIComponent(q)}&fields=files(id)&pageSize=1&orderBy=createdTime&corpora=allDrives&supportsAllDrives=true&includeItemsFromAllDrives=true`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!list.ok) throw new DriveRequestError(await failureOf(list));
-  const found = ((await list.json()) as { files?: Array<{ id?: string }> }).files?.[0]?.id;
+  // マイドライブ直下は既定の corpora(user)で足りる。それ以外は親が共有ドライブ内かもしれないので allDrives
+  const corpora = parent === "root" ? "" : "&corpora=allDrives";
+  const hits: Array<{ id: string; createdTime: string }> = [];
+  let pageToken: string | undefined;
+  for (let page = 0; page < 20; page++) {
+    const list = await fetchImpl(`${API_BASE}/files?q=${encodeURIComponent(q)}&fields=${encodeURIComponent("nextPageToken,incompleteSearch,files(id,createdTime)")}&pageSize=100${corpora}&supportsAllDrives=true&includeItemsFromAllDrives=true${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ""}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!list.ok) throw new DriveRequestError(await failureOf(list));
+    const body = (await list.json()) as { files?: Array<{ id?: string; createdTime?: string }>; nextPageToken?: string; incompleteSearch?: boolean };
+    for (const f of body.files ?? []) if (f.id) hits.push({ id: f.id, createdTime: f.createdTime ?? "" });
+    if (!body.nextPageToken) {
+      // 検索が欠けた可能性があり、1件も見つかっていないなら、作ると重複しうるので止める
+      if (hits.length === 0 && body.incompleteSearch) throw new DriveliftError(`Drive reported an incomplete search while looking for folder "${name}"; not creating it to avoid a duplicate. Retry, or pass the folder's ID as folder_id.`);
+      break;
+    }
+    pageToken = body.nextPageToken;
+  }
+  // 同名が複数あっても毎回同じもの(最古)を選ぶ。並べ替えは API の orderBy(大きい集合で非推奨)でなく手元で行う
+  hits.sort((a, b) => a.createdTime.localeCompare(b.createdTime) || a.id.localeCompare(b.id));
+  return hits[0]?.id ?? null;
+}
+
+async function findOrCreateFolder(accessToken: string, name: string, parent: string, fetchImpl: FetchLike): Promise<{ id: string; created: boolean }> {
+  const found = await findFolder(accessToken, name, parent, fetchImpl);
   if (found) return { id: found, created: false };
   const res = await fetchImpl(`${API_BASE}/files?fields=id&supportsAllDrives=true`, {
     method: "POST",
@@ -169,20 +189,28 @@ async function findOrCreateFolder(accessToken: string, name: string, parent: str
   return { id, created: true };
 }
 
-export async function ensureFolderPath(accessToken: string, folderPath: string, parentId: string | undefined, fetchImpl: FetchLike): Promise<{ id: string; created: string[] }> {
+/**
+ * onCreated は作成のたびに呼ぶ。途中の階層で失敗しても、それまでに作ったフォルダを呼び出し側が報告できるようにするため。
+ */
+export async function ensureFolderPath(accessToken: string, folderPath: string, parentId: string | undefined, fetchImpl: FetchLike, onCreated: (name: string) => void = () => undefined): Promise<{ id: string; created: string[] }> {
   const parts = splitFolderPath(folderPath);
-  if (parts.length === 0) throw new DriveliftError("folder_path is empty.");
+  if (parts.length === 0) throw new DriveliftInputError("folder_path is empty.");
   let parent = parentId ?? "root";
   const created: string[] = [];
   for (const name of parts) {
     const key = `${parent}\u0000${name}`;
     let step = inflightFolders.get(key);
+    // 他の呼び出しが作っている最中のものに相乗りした場合、自分は作っていないので created に数えない
+    const originator = !step;
     if (!step) {
       step = findOrCreateFolder(accessToken, name, parent, fetchImpl).finally(() => inflightFolders.delete(key));
       inflightFolders.set(key, step);
     }
     const r = await step;
-    if (r.created) created.push(name);
+    if (r.created && originator) {
+      created.push(name);
+      onCreated(name);
+    }
     parent = r.id;
   }
   return { id: parent, created };
@@ -203,15 +231,15 @@ export interface ShareSpec {
 }
 
 export function validateShare(spec: ShareSpec): void {
-  if (!SHARE_ROLES.includes(spec.role)) throw new DriveliftError(`share role must be one of ${SHARE_ROLES.join(", ")}.`);
-  if (!SHARE_TYPES.includes(spec.type)) throw new DriveliftError(`share type must be one of ${SHARE_TYPES.join(", ")}.`);
+  if (!SHARE_ROLES.includes(spec.role)) throw new DriveliftInputError(`share role must be one of ${SHARE_ROLES.join(", ")}.`);
+  if (!SHARE_TYPES.includes(spec.type)) throw new DriveliftInputError(`share type must be one of ${SHARE_TYPES.join(", ")}.`);
   if (spec.type === "anyone") {
-    if (spec.target) throw new DriveliftError('share type "anyone" takes no target.');
+    if (spec.target) throw new DriveliftInputError('share type "anyone" takes no target.');
     return;
   }
-  if (!spec.target) throw new DriveliftError(`share type "${spec.type}" needs a target (${spec.type === "domain" ? "domain name" : "email address"}).`);
+  if (!spec.target) throw new DriveliftInputError(`share type "${spec.type}" needs a target (${spec.type === "domain" ? "domain name" : "email address"}).`);
   if (spec.type === "domain" ? spec.target.includes("@") : !spec.target.includes("@")) {
-    throw new DriveliftError(`share target "${spec.target}" does not look like ${spec.type === "domain" ? "a domain name" : "an email address"}.`);
+    throw new DriveliftInputError(`share target "${spec.target}" does not look like ${spec.type === "domain" ? "a domain name" : "an email address"}.`);
   }
 }
 

@@ -71,7 +71,7 @@ MCP サーバーと CLI は同じハンドラ（core.ts）を使う。外部依�
 
 - drivelift が作っていない既存フォルダ（共有ドライブ内）を `folder_id` に指定しても、その中にファイルとフォルダを作れる。フォルダ自体の読み取りは 404 になる（drive.file は作成の親にだけ ID で書き込める）
 - `share` で domain に閲覧権限を付けられる（`allowFileDiscovery: false` ＝リンクを知っている組織内の人だけ）
-- 共有ドライブ内のフォルダの下でも `folder_path` のフォルダを2回目に再利用できる（`corpora=allDrives`）
+- `folder_path` のフォルダは2回目に再利用される。マイドライブ直下（既定の corpora）と共有ドライブ内のフォルダの下（`corpora=allDrives`）の両方で確認。並べ替えは API の orderBy を使わず、全ページを取って手元で最古を選ぶ。検索が欠けた（incompleteSearch）うえで1件も無いときは、重複を避けるため作らずに止める
 - md → Docs は Markdown として解釈される（見出し・表になる）
 
 ## 未検証（実アカウントで確かめる）

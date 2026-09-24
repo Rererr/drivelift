@@ -18,7 +18,8 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import { cancelPendingLogin, DEFAULT_AUTH_WAIT_SECONDS, defaultDeps, handleAuthStart, handleAuthStatus, handleGcloudSetup, handleImportClientSecret, handleStatus, handleUpload, MAX_AUTH_WAIT_SECONDS, type Deps } from "./core.js";
 import { DriveliftError } from "./errors.js";
-import { SHARE_ROLES, SHARE_TYPES, type ShareRole, type ShareType } from "./drive.js";
+import { MAX_SHARES, SHARE_ROLES, SHARE_TYPES, type ShareRole, type ShareType } from "./drive.js";
+import { PROJECT_ID_PATTERN } from "./gcloud.js";
 import { autoTargetSummary, CONVERT_MODES } from "./mime.js";
 import { resolvePackageVersion } from "./version.js";
 
@@ -120,7 +121,7 @@ export function createServer(deps: Deps = defaultDeps()): McpServer {
         "With confirm: true it runs those commands (and `gcloud auth login`, opening a browser, if gcloud has no active account). " +
         "Steps 3-4 (consent screen, Desktop-app OAuth client) cannot be automated and are returned as next_steps with project-scoped Console links, plus console_form with sample values for every field (show it to the user as a table).",
       inputSchema: z.object({
-        project_id: z.string().regex(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/).optional().describe("Project ID to use or create. Default: gcloud's current project, else a generated drivelift-xxxxxxxx."),
+        project_id: z.string().regex(PROJECT_ID_PATTERN).optional().describe("Project ID to use or create. Default: gcloud's current project, else a generated drivelift-xxxxxxxx."),
         confirm: z.boolean().optional().describe("Default false (plan only). true = execute the planned commands."),
         login_if_needed: z.boolean().optional().describe("Default true. With confirm, run `gcloud auth login` when no gcloud account is active."),
       }),
@@ -159,9 +160,9 @@ export function createServer(deps: Deps = defaultDeps()): McpServer {
               target: z.string().optional(),
             }),
           )
-          .max(20)
+          .max(MAX_SHARES)
           .optional()
-          .describe("Permissions to add to the uploaded file (max 20). Only when the user asked for it, to recipients the user named."),
+          .describe(`Permissions to add to the uploaded file (max ${MAX_SHARES}). Only when the user asked for it, to recipients the user named.`),
         notify: z.boolean().optional().describe("Send Google's notification email to user/group shares. Default false. Sharing with an address that has no Google account usually requires notify: true."),
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },

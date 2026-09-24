@@ -175,13 +175,44 @@ describe("ensureFolderPath の並行呼び出し", () => {
     expect(new Set(results.map((r) => r.id)).size).toBe(1);
   });
 
-  it("共有ドライブ内でも見つけられるよう corpora=allDrives で検索する", async () => {
-    let url = "";
-    await ensureFolderPath("t", "A", "shared-folder", async (input) => {
-      url = String(input);
+  it("親がマイドライブ直下なら既定の corpora、それ以外は allDrives で検索し、orderBy は使わない", async () => {
+    const urls: string[] = [];
+    const fetchImpl: FetchLike = async (input) => {
+      urls.push(String(input));
       return new Response(JSON.stringify({ files: [{ id: "x" }] }));
-    });
-    expect(url).toContain("corpora=allDrives");
-    expect(url).toContain("orderBy=createdTime");
+    };
+    await ensureFolderPath("t", "A", "shared-folder", fetchImpl);
+    await ensureFolderPath("t", "B", undefined, fetchImpl);
+    expect(urls[0]).toContain("corpora=allDrives");
+    expect(urls[1]).not.toContain("corpora=");
+    expect(urls.join()).not.toContain("orderBy");
+  });
+
+  it("全ページを見て最古を選び、incompleteSearch で何も無ければ作らずに止める", async () => {
+    let page = 0;
+    const paged: FetchLike = async () => {
+      page += 1;
+      return page === 1
+        ? new Response(JSON.stringify({ files: [], nextPageToken: "p2" }))
+        : new Response(JSON.stringify({ files: [{ id: "new", createdTime: "2026-02-01T00:00:00Z" }, { id: "old", createdTime: "2026-01-01T00:00:00Z" }] }));
+    };
+    await expect(ensureFolderPath("t", "A", undefined, paged)).resolves.toEqual({ id: "old", created: [] });
+
+    let posted = false;
+    const incomplete: FetchLike = async (_i, init) => {
+      if (init?.method === "POST") posted = true;
+      return new Response(JSON.stringify({ files: [], incompleteSearch: true }));
+    };
+    await expect(ensureFolderPath("t", "A", "sd", incomplete)).rejects.toThrow(/incomplete search/);
+    expect(posted).toBe(false);
+  });
+
+  it("相乗りした側は created を報告しない", async () => {
+    const fetchImpl: FetchLike = async (_i, init) => {
+      await new Promise((r) => setTimeout(r, 5));
+      return init?.method === "POST" ? new Response(JSON.stringify({ id: "F1" })) : new Response(JSON.stringify({ files: [] }));
+    };
+    const [a, b] = await Promise.all([ensureFolderPath("t", "X", undefined, fetchImpl), ensureFolderPath("t", "X", undefined, fetchImpl)]);
+    expect([a.created, b.created]).toEqual([["X"], []]);
   });
 });

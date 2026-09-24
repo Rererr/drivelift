@@ -196,6 +196,55 @@ describe("handleUpload", () => {
     expect(deps.calls).toHaveLength(0);
   });
 
+  it("共有前のトークン取り直しが失敗しても、アップロード結果は返し共有だけ失敗にする", async () => {
+    saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+    const file = join(dir, "r.csv");
+    writeFileSync(file, "a,b");
+    let now = NOW;
+    const deps = makeDeps(dir, ENV_CREDS, (url) => {
+      if (url.includes("/upload/")) return new Response(null, { headers: { Location: "https://upload.test/s" } });
+      if (url === "https://upload.test/s") {
+        now = NOW + 3_600_000; // 送信中に access_token が期限切れになる
+        return new Response(JSON.stringify({ id: "f1" }));
+      }
+      if (url.includes("/token")) throw new TypeError("fetch failed");
+      return undefined;
+    });
+    deps.now = () => now;
+    const r = await handleUpload(deps, { path: file, share: [{ role: "reader", type: "domain", target: "example.com" }] });
+    expect(r.id).toBe("f1");
+    expect(r.shared).toEqual([expect.objectContaining({ ok: false, error: expect.stringMatching(/could not refresh/) })]);
+  });
+
+  it("パスの途中で失敗しても、それまでに作ったフォルダをエラーに含める", async () => {
+    saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+    const file = join(dir, "r.csv");
+    writeFileSync(file, "a,b");
+    let posts = 0;
+    const deps = makeDeps(dir, ENV_CREDS, (url, init) => {
+      if (url.includes("/drive/v3/files?q=")) return new Response(JSON.stringify({ files: [] }));
+      if (init?.method === "POST" && url.includes("/drive/v3/files?fields=id")) {
+        posts += 1;
+        return posts === 1 ? new Response(JSON.stringify({ id: "A1" })) : new Response(JSON.stringify({ error: { message: "boom" } }), { status: 500 });
+      }
+      return undefined;
+    });
+    await expect(handleUpload(deps, { path: file, folder_path: "A/B" })).rejects.toThrow(/folders already created before the failure: A\b/);
+  });
+
+  it("タイムアウトなど DriveliftError 以外の失敗でも、作ったフォルダを伝える", async () => {
+    saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+    const file = join(dir, "r.csv");
+    writeFileSync(file, "a,b");
+    const deps = makeDeps(dir, ENV_CREDS, (url) => {
+      if (url.includes("/drive/v3/files?q=")) return new Response(JSON.stringify({ files: [] }));
+      if (url.includes("/drive/v3/files?fields=id")) return new Response(JSON.stringify({ id: "A1" }));
+      if (url.includes("/upload/")) throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      return undefined;
+    });
+    await expect(handleUpload(deps, { path: file, folder_path: "A" })).rejects.toThrow(/TimeoutError.*folders already created before the failure: A/);
+  });
+
   it("フォルダを作った後に upload が失敗したら、作ったフォルダをエラーに含める", async () => {
     saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
     const file = join(dir, "r.csv");

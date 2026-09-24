@@ -18,7 +18,7 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { defaultDeps, handleAuthStart, handleGcloudSetup, handleImportClientSecret, handleStatus, handleUpload, waitForLogin } from "./core.js";
-import { DriveliftError } from "./errors.js";
+import { DriveliftError, DriveliftInputError } from "./errors.js";
 import type { ShareSpec } from "./drive.js";
 import { CONVERT_MODES, type ConvertMode } from "./mime.js";
 import { runServer } from "./server.js";
@@ -203,7 +203,7 @@ export async function main(argv: string[]): Promise<number> {
     }
   } catch (error) {
     printError(error);
-    return error instanceof UsageError ? 2 : 1;
+    return error instanceof UsageError || error instanceof DriveliftInputError ? 2 : 1;
   }
 }
 

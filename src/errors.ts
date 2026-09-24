@@ -21,3 +21,11 @@ export class DriveliftError extends Error {
     return this.status ? { error: this.message, ...this.status } : { error: this.message };
   }
 }
+
+/** 呼び出し側の指定の誤り(何も実行する前に弾いたもの)。CLI では使い方の誤りとして終了コード 2 にする。 */
+export class DriveliftInputError extends DriveliftError {
+  constructor(message: string) {
+    super(message);
+    this.name = "DriveliftInputError";
+  }
+}

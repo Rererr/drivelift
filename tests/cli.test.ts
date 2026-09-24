@@ -17,6 +17,10 @@ describe("cli", () => {
       expect(await main(["upload", "x", "--share", "bad"])).toBe(2);
       expect(await main(["setup-gcloud", "--project"])).toBe(2);
       expect(await main(["nope"])).toBe(2);
+      // core 側で弾く指定の誤りも使い方の誤りとして 2
+      expect(await main(["upload", "package.json", "--share", "admin:user:a@b.c"])).toBe(2);
+      expect(await main(["upload", "package.json", "--folder", ""])).toBe(2);
+      expect(await main(["setup-gcloud", "--project=Bad_ID"])).toBe(2);
       expect(await main(["upload", "--help"])).toBe(0);
     } finally {
       err.mockRestore();
