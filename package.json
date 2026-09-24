@@ -1,0 +1,54 @@
+{
+  "name": "drivelift",
+  "version": "0.1.0",
+  "mcpName": "io.github.Rererr/drivelift",
+  "description": "Lift local files into Google Drive as native Docs/Sheets/Slides — a bring-your-own-OAuth-client MCP server and CLI for LLM agents (Google Drive only, drive.file scope, guided setup).",
+  "type": "module",
+  "license": "MIT",
+  "author": "Rererr",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Rererr/drivelift.git"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "google-drive",
+    "google-sheets",
+    "google-docs",
+    "upload",
+    "llm",
+    "claude-code"
+  ],
+  "bin": {
+    "drivelift": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepack": "npm run build",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@types/node": "^26.1.1",
+    "tsx": "^4.23.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "homepage": "https://github.com/Rererr/drivelift#readme",
+  "bugs": {
+    "url": "https://github.com/Rererr/drivelift/issues"
+  }
+}
