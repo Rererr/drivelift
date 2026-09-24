@@ -69,7 +69,7 @@ From then on, just call `upload`. Calling `upload` while something is missing re
 |--|--|
 | `path` | Local file path |
 | `name` | Name in Drive. Default: the file name (extension dropped when converting) |
-| `folder_id` | Destination folder ID (after `/folders/` in the folder URL). Default: My Drive root. See Limitations |
+| `folder_id` | Destination folder ID (after `/folders/` in the folder URL). Any folder you can edit, shared drives included. Default: My Drive root |
 | `folder_path` | A folder path such as `Reports/2026-09`, found or created under `folder_id` (or My Drive root). Only folders drivelift created are reused |
 | `convert` | `auto` (default) / `none` / `spreadsheet` / `document` / `presentation` |
 | `share` | Permissions to add to the uploaded file. Each item has `role` (`reader` / `commenter` / `writer`), `type` (`user` / `group` / `domain` / `anyone`) and `target` (email for user/group, domain name for domain, none for anyone) |
@@ -109,14 +109,14 @@ One person can create the OAuth client and hand the downloaded JSON to the team.
 - **Only the JSON is shared.** Each member imports it (`import_client_secret` or `mv`) and signs in with `auth_start` **as themselves**. Tokens stay on each machine; nobody acts with the representative's permissions
 - **On Google Workspace, make the consent screen Internal.** Accounts outside the organization cannot authorize, so a leaked JSON is useless outside it. Google does not treat a Desktop client secret as confidential, but still hand it out through a password manager or DM, not a repository
 - **Files land in each member's My Drive.** Grant access with `share` (e.g. read access for everyone in the organization: `{"role": "reader", "type": "domain", "target": "example.com"}`)
-- **Everyone writing into one shared folder is likely not possible with the current scope.** `drive.file` access is per user, so a folder created by A's drivelift is expected to be invisible to B's drivelift even when shared (not verified yet). For now, create files in each My Drive and deliver them with `share`, or post the URLs somewhere shared
+- **A team shared folder (including a shared drive) works.** Pass its ID as `folder_id` and each member's drivelift writes straight into it. Subfolders from `folder_path`, however, are created per member (A's drivelift-made folder is invisible to B's drivelift). To gather everything in one place, create the subfolders by hand and hand out their IDs for `folder_id`
 - **Recreating the client makes everyone hit `invalid_client`.** Hand out the new JSON; importing it discards the old token and leads to a fresh sign-in
 - **Give the project at least two Owners**, so the client stays manageable when the representative leaves
 - **Drive API quota is per project and shared by everyone.** Normal use does not come close
 
 ## Limitations
 
-- With the `drive.file` scope, folders that drivelift did not create are invisible to it, so a `folder_id` pointing at an existing folder is expected to be rejected with 404 (being verified on a real account; results go to docs/design.md). For now, omit `folder_id`, let the file land in My Drive root, and move it in the Drive UI. A folder-creation tool or an opt-in `drive` scope will be decided after that check
+- `folder_id` accepts any folder the signed-in account can edit, including folders drivelift did not create and folders in shared drives (confirmed on a shared drive, 2026-09-25). With `drive.file`, drivelift cannot see those folders' contents, so `folder_path` only reuses folders drivelift created; it makes its own folder even if a same-named one made by someone else exists
 - Existing files with the same name are not overwritten; a new file is created (Drive's default)
 - `token.json` is not encrypted. On shared machines point `DRIVELIFT_CONFIG_DIR` at a protected location
 - If a Google Workspace admin restricts third-party API access, even an Internal client may be blocked from authorizing

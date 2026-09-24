@@ -143,7 +143,7 @@ describe("handleUpload", () => {
     expect(result).toEqual({ id: "f1", name: "report", mimeType: "application/vnd.google-apps.spreadsheet", url: "https://docs.google.com/spreadsheets/d/f1/edit", converted_to: "application/vnd.google-apps.spreadsheet", account: "me@example.com", folder_id: "F", folders_created: [], shared: [] });
   });
 
-  it("folder_id 指定で 404 なら drive.file の制約を説明する", async () => {
+  it("folder_id 指定で 404 なら ID と編集権限の確認を案内する", async () => {
     saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
     const file = join(dir, "a.md");
     writeFileSync(file, "# x");
@@ -152,7 +152,7 @@ describe("handleUpload", () => {
       n += 1;
       return n === 1 ? new Response(JSON.stringify({ error: { message: "File not found: F" } }), { status: 404 }) : undefined;
     });
-    await expect(handleUpload(deps, { path: file, folder_id: "F" })).rejects.toThrow(/drive\.file scope/);
+    await expect(handleUpload(deps, { path: file, folder_id: "F" })).rejects.toThrow(/can edit that folder/);
   });
 
   it("folder_path でフォルダを用意してから置き、共有は1件ずつ成否を返す(失敗してもアップロードは成功扱い)", async () => {

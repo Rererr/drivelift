@@ -51,7 +51,7 @@ MCP サーバーと CLI は同じハンドラ（core.ts）を使う。外部依�
 
 ## セキュリティ上の性質
 
-- `upload` は読めるローカルファイルなら何でも送れるが、行き先は利用者自身のマイドライブに限られる。プロンプトインジェクションで流出させるには「共有」という別の手順が要る。この性質は `drive.file` に固定していることで成り立っている
+- `upload` は読めるローカルファイルなら何でも送れる。行き先は既定ではマイドライブだが、`folder_id` には利用者が編集できる任意のフォルダを指定できる（drive.file でも可、2026-09-25 実測）。攻撃者が自分のフォルダを利用者に編集権限で共有しておき、プロンプトインジェクションでその ID を `folder_id` に渡させれば、ファイルを攻撃者の手元に置ける。drivelift からは正規のチームフォルダと区別できないので、実装では塞げない。対策はツール説明で「folder_id は利用者が指定したものだけを使う」と明示することと、ホスト側の許可プロンプトで upload の引数を確認させることに置く。`share` の `anyone` も同じ理由で、利用者が明示したときだけ使うよう説明に書いている
 - ループバックの待ち受けは state を最初に照合し、state の無いリクエストは成功にも失敗にも進めない。他サイトからのポート総当たりでログインを妨害できない
 - 応答 HTML に埋める外部由来の値（Google の error 値・エラーメッセージ）はエスケープする
 - code 交換中の重複コールバックは 409 で無視し、二重交換しない
@@ -67,9 +67,11 @@ MCP サーバーと CLI は同じハンドラ（core.ts）を使う。外部依�
 
 注意: Sheets は xlsx の行高（pt）を px として取り込み、Hyperlink に display が無いと表示文字を `#gid=…` に置き換える。どちらも drivelift ではなく xlsx を作る側で対処する事柄なので、README には書かず利用側（pacenote の test-report.py）に記録した。
 
+- drivelift が作っていない既存フォルダ（共有ドライブ内）を `folder_id` に指定しても、その中にファイルとフォルダを作れる。フォルダ自体の読み取りは 404 になる（drive.file は作成の親にだけ ID で書き込める）
+- `share` で domain に閲覧権限を付けられる（`allowFileDiscovery: false` ＝リンクを知っている組織内の人だけ）
+
 ## 未検証（実アカウントで確かめる）
 
-1. `drive.file` スコープで、drivelift が作っていない既存フォルダを `folder_id` に指定したときの挙動。404 なら「drivelift でフォルダを作ってから共有する」運用を README に確定させるか、`drive` スコープを opt-in で足す（内部アプリなら審査不要）
 2. resumable セッション URL への PUT に Authorization が要るか（付けた状態では通る。外した場合は未確認）
 4. Console の URL（`auth/overview`・`auth/clients/create`）は新 UI のもの。旧 UI に戻された場合は status.ts の 1 テーブルを直す
 6. `text/markdown` → Docs、`xlsm` → Sheets の変換が通ること（`about.importFormats` で確認できる）
@@ -77,6 +79,6 @@ MCP サーバーと CLI は同じハンドラ（core.ts）を使う。外部依�
 
 ## 今後
 
-- 検証 1 の結果次第で、フォルダ作成ツールか `drive` スコープの opt-in（`DRIVELIFT_SCOPE=drive`）。opt-in を入れる場合、攻撃者が共有したフォルダを `folder_id` に指定するだけで流出経路になるので、設計書とツール description に警告を書く
+- `drive` スコープの opt-in は不要になった（既存フォルダ・共有ドライブへの書き込みは drive.file で通る）。なお `folder_id` に他人が共有したフォルダを指定すると、そこへファイルを置けること自体は drive.file でも同じなので、description では「利用者が指定した置き先にだけ置く」前提を崩さない
 - pacenote の `/test-report` スキルを rclone 経由から `drivelift upload` に差し替える
 - npm 公開（`drivelift@0`。利用者側は `npx -y drivelift@0` でメジャー固定）

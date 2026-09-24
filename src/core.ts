@@ -345,7 +345,7 @@ export async function handleUpload(deps: Deps, input: UploadInput): Promise<Uplo
     if (error instanceof DriveRequestError) {
       const status = statusFromDriveFailure(deps, error.failure);
       if (status) throw new DriveliftError(error.message, status);
-      if (error.failure.kind === "not_found") throw new DriveliftError(`Drive returned 404 (${error.failure.message}). If you passed folder_id: with the drive.file scope Drive only exposes files and folders that drivelift itself created, so an existing folder is usually invisible to it and cannot be used as a destination — this is a known limitation of the scope, not of the account's permissions. Retry without folder_id (the file goes to My Drive root) and move it in the Drive UI.`);
+      if (error.failure.kind === "not_found") throw new DriveliftError(`Drive returned 404 (${error.failure.message}). If you passed folder_id: check that the ID is right (the part after /folders/ in the folder URL) and that the signed-in account can edit that folder. drivelift can create files in any folder the account can edit, even though it cannot list that folder's contents.`);
     }
     throw error;
   }
