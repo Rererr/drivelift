@@ -19,7 +19,7 @@ import {
   saveClientSecret,
   type ClientCredentials,
 } from "./config.js";
-import { DriveRequestError, driveAbout, uploadToDrive, type DriveFailure, type FetchLike } from "./drive.js";
+import { createPermission, DriveRequestError, driveAbout, ensureFolderPath, uploadToDrive, validateShare, type DriveFailure, type FetchLike, type ShareSpec } from "./drive.js";
 import { defaultExecGcloud, runGcloudSetup, type ExecGcloud, type GcloudSetupInput, type GcloudSetupResult } from "./gcloud.js";
 import { DriveliftError } from "./errors.js";
 import { CONVERT_MODES, defaultDriveName, extensionOf, resolveTargetMime, sourceMimeFor, type ConvertMode } from "./mime.js";
@@ -258,7 +258,20 @@ export interface UploadInput {
   path: string;
   name?: string;
   folder_id?: string;
+  /** "a/b" 形式。folder_id(省略時はマイドライブ直下)の下に探し、無ければ作る。 */
+  folder_path?: string;
   convert?: ConvertMode;
+  share?: ShareSpec[];
+  /** user/group への共有で通知メールを送るか。既定 false。 */
+  notify?: boolean;
+}
+
+export interface ShareOutcome {
+  role: string;
+  type: string;
+  target: string | null;
+  ok: boolean;
+  error?: string;
 }
 
 export interface UploadResult {
@@ -268,6 +281,9 @@ export interface UploadResult {
   url: string;
   converted_to: string | null;
   account: string | null;
+  folder_id: string | null;
+  folders_created: string[];
+  shared: ShareOutcome[];
 }
 
 export async function handleUpload(deps: Deps, input: UploadInput): Promise<UploadResult> {
@@ -277,6 +293,9 @@ export async function handleUpload(deps: Deps, input: UploadInput): Promise<Uplo
   if (!existsSync(filePath)) throw new DriveliftError(`File not found: ${filePath}`);
   if (!statSync(filePath).isFile()) throw new DriveliftError(`Not a regular file: ${filePath}`);
 
+  // 共有指定の誤りは何も作る前に弾く(アップロード後に失敗すると中途半端な状態が残る)
+  for (const spec of input.share ?? []) validateShare(spec);
+
   const creds = requireCreds(deps);
   const access = await getAccessToken(creds, deps.configDir, deps.fetchImpl, deps.now);
   if (!access) throw new DriveliftError("Not signed in.", noTokenStatus(deps.configDir, creds.source));
@@ -285,16 +304,43 @@ export async function handleUpload(deps: Deps, input: UploadInput): Promise<Uplo
   const targetMime = resolveTargetMime(ext, convert);
   const name = input.name ?? defaultDriveName(filePath, targetMime !== null);
   try {
+    let folderId = input.folder_id;
+    let foldersCreated: string[] = [];
+    if (input.folder_path) {
+      const folder = await ensureFolderPath(access.accessToken, input.folder_path, input.folder_id, deps.fetchImpl);
+      folderId = folder.id;
+      foldersCreated = folder.created;
+    }
     const file = await uploadToDrive({
       accessToken: access.accessToken,
       filePath,
       name,
       sourceMime: sourceMimeFor(ext),
       targetMime,
-      ...(input.folder_id ? { folderId: input.folder_id } : {}),
+      ...(folderId ? { folderId } : {}),
       fetchImpl: deps.fetchImpl,
     });
-    return { id: file.id, name: file.name, mimeType: file.mimeType, url: file.webViewLink, converted_to: targetMime, account: access.token.account ?? null };
+    // 共有はファイルができた後なので、1件の失敗で全体を失敗にしない(ファイルは残る)。件ごとの成否を返す
+    const shared: ShareOutcome[] = [];
+    for (const spec of input.share ?? []) {
+      try {
+        await createPermission(access.accessToken, file.id, spec, input.notify ?? false, deps.fetchImpl);
+        shared.push({ role: spec.role, type: spec.type, target: spec.target ?? null, ok: true });
+      } catch (error) {
+        shared.push({ role: spec.role, type: spec.type, target: spec.target ?? null, ok: false, error: error instanceof DriveRequestError && error.failure.kind !== "other" ? `${error.failure.kind}` : error instanceof Error ? error.message : String(error) });
+      }
+    }
+    return {
+      id: file.id,
+      name: file.name,
+      mimeType: file.mimeType,
+      url: file.webViewLink,
+      converted_to: targetMime,
+      account: access.token.account ?? null,
+      folder_id: folderId ?? null,
+      folders_created: foldersCreated,
+      shared,
+    };
   } catch (error) {
     if (error instanceof DriveRequestError) {
       const status = statusFromDriveFailure(deps, error.failure);

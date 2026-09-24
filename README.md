@@ -70,7 +70,12 @@ Node.js 22.13 以降が必要。
 | `path` | ローカルのファイルパス |
 | `name` | Drive 上の名前。省略時はファイル名（変換するときは拡張子を落とす） |
 | `folder_id` | 置き先フォルダの ID（フォルダ URL の `/folders/` 以降）。省略時はマイドライブ直下。下記「制約」を参照 |
+| `folder_path` | `テスト報告/2026-09` のようなフォルダのパス。`folder_id`（省略時はマイドライブ直下）の下で探し、無ければ作る。再利用されるのは drivelift が作ったフォルダだけ |
 | `convert` | `auto`（既定）/ `none` / `spreadsheet` / `document` / `presentation` |
+| `share` | アップロードしたファイルに付ける共有設定のリスト。各要素は `role`（`reader` / `commenter` / `writer`）、`type`（`user` / `group` / `domain` / `anyone`）、`target`（user・group はメールアドレス、domain はドメイン名、anyone は不要） |
+| `notify` | user・group への共有で Google の通知メールを送るか。既定は送らない |
+
+共有は、利用者が指示したときだけ付ける前提で、ツールの説明にもそう書いてある。`anyone` は「リンクを知っている全員」になり外部公開と同じなので、利用者が明示したときだけ使う。共有の一部が失敗してもアップロードは取り消さず、結果の `shared` に1件ずつ成否を返す。
 
 `auto` の変換先: xlsx・xls・csv・tsv・ods → スプレッドシート、docx・doc・odt・rtf・txt・md・html → ドキュメント、pptx・ppt・odp → スライド。それ以外はそのまま置く。
 
@@ -82,10 +87,11 @@ drivelift doctor                導入状態と次の一手
 drivelift login                 ブラウザでログイン（完了まで待つ）
 drivelift import-secret [path]  クライアント JSON の取り込み
 drivelift setup-gcloud [--project ID] [--yes]  gcloud で手順 1・2 を実行（--yes なしは計画表示）
-drivelift upload <file> [--folder ID] [--name N] [--convert MODE] [--json]
+drivelift upload <file> [--folder ID] [--folder-path A/B] [--name N] [--convert MODE]
+                 [--share ROLE:TYPE[:TARGET]]... [--notify] [--json]
 ```
 
-`upload` は既定で URL だけを標準出力に出すので、スクリプトから拾いやすい。
+`upload` は既定で URL だけを標準出力に出すので、スクリプトから拾いやすい。`--share` は繰り返し指定できる（例: `--share reader:domain:example.com --share writer:user:alice@example.com`）。共有に1件でも失敗すると、URL は出したうえで終了コード 3 を返す。
 
 ## 設定
 
@@ -95,6 +101,18 @@ drivelift upload <file> [--folder ID] [--name N] [--convert MODE] [--json]
 | `~/.config/drivelift/token.json` | リフレッシュトークンと access_token のキャッシュ（0600、平文） |
 | 環境変数 `DRIVELIFT_CONFIG_DIR` | 設定ディレクトリの変更 |
 | 環境変数 `DRIVELIFT_CLIENT_ID` / `DRIVELIFT_CLIENT_SECRET` | ファイルの代わりにクライアントを渡す（`.mcp.json` の `env` 向け） |
+
+## チームで使う場合
+
+代表者が1人で OAuth クライアントを作り、ダウンロードした JSON をメンバーに配る運用ができる。
+
+- **配るのは JSON だけ。** 各メンバーは `import_client_secret`（または `mv`）で取り込み、`auth_start` で**自分のアカウントで**ログインする。トークンは各自の手元にだけあり、代表者の権限で他人が操作することはない
+- **Google Workspace なら同意画面は「内部」にする。** 組織外のアカウントは認可できないので、JSON が外に漏れても組織外からは使えない。Google はデスクトップ種別の client_secret を秘密情報として扱わないが、配布はパスワード管理ツールや DM に留め、リポジトリには置かない
+- **ファイルは各自のマイドライブに作られる。** 共有したい相手には `share` で権限を付ける（例: 同じ組織の全員に閲覧権限なら `{"role": "reader", "type": "domain", "target": "example.com"}`）
+- **共有フォルダに全員で置く運用は、今の権限範囲では難しい見込み。** `drive.file` の権限はユーザーごとに付くため、Aさんの drivelift が作ったフォルダを共有しても、Bさんの drivelift からは見えないと考えている（未検証）。当面は各自のマイドライブに作り、`share` で相手に届けるか、URL を共有の置き場に載せる
+- **クライアントを作り直すと全員が `invalid_client` になる。** 新しい JSON を配り直せば、取り込み時に古いトークンを破棄して再ログインに進む
+- **プロジェクトの Owner を2人以上にしておく。** 代表者の異動や退職でクライアントを管理できなくなるのを防ぐ
+- **Drive API の上限はプロジェクト単位で全員が共有する。** 通常の利用で問題になる量ではない
 
 ## 制約と注意
 

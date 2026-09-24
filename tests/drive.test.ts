@@ -98,3 +98,59 @@ describe("uploadToDrive", () => {
     await expect(uploadToDrive({ accessToken: "t", filePath: file, name: "r", sourceMime: "a/b", targetMime: null, fetchImpl })).rejects.toBeInstanceOf(DriveRequestError);
   });
 });
+
+import { createPermission, ensureFolderPath, splitFolderPath, validateShare } from "../src/drive.js";
+
+describe("ensureFolderPath", () => {
+  it("既存は再利用し、無い階層だけ作る。名前の ' はクエリでエスケープする", async () => {
+    const queries: string[] = [];
+    const created: Array<Record<string, unknown>> = [];
+    const fetchImpl: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        created.push(body);
+        return new Response(JSON.stringify({ id: `new-${String(body["name"])}` }));
+      }
+      const q = new URL(url).searchParams.get("q") ?? "";
+      queries.push(q);
+      return new Response(JSON.stringify({ files: q.includes("name='Reports'") ? [{ id: "existing-reports" }] : [] }));
+    };
+    const r = await ensureFolderPath("t", "/Reports//Bob's 2026/", undefined, fetchImpl);
+    expect(r).toEqual({ id: "new-Bob's 2026", created: ["Bob's 2026"] });
+    expect(queries[0]).toContain("'root' in parents");
+    expect(queries[1]).toContain("name='Bob\\'s 2026'");
+    expect(queries[1]).toContain("'existing-reports' in parents");
+    expect(created).toEqual([{ name: "Bob's 2026", mimeType: "application/vnd.google-apps.folder", parents: ["existing-reports"] }]);
+  });
+
+  it("空パスは弾き、splitFolderPath は空要素を捨てる", async () => {
+    expect(splitFolderPath(" a / /b/ ")).toEqual(["a", "b"]);
+    await expect(ensureFolderPath("t", "//", undefined, async () => new Response("{}"))).rejects.toThrow(/empty/);
+  });
+});
+
+describe("validateShare / createPermission", () => {
+  it("種類ごとに target の要否と形を検査する", () => {
+    expect(() => validateShare({ role: "reader", type: "anyone" })).not.toThrow();
+    expect(() => validateShare({ role: "reader", type: "anyone", target: "x" })).toThrow(/no target/);
+    expect(() => validateShare({ role: "reader", type: "user" })).toThrow(/needs a target/);
+    expect(() => validateShare({ role: "reader", type: "user", target: "example.com" })).toThrow(/email/);
+    expect(() => validateShare({ role: "reader", type: "domain", target: "a@example.com" })).toThrow(/domain/);
+    expect(() => validateShare({ role: "owner" as never, type: "user", target: "a@b.c" })).toThrow(/role/);
+  });
+
+  it("user は emailAddress と通知フラグ、domain は domain を送り、通知フラグは付けない", async () => {
+    const calls: Array<{ url: string; body: unknown }> = [];
+    const fetchImpl: FetchLike = async (input, init) => {
+      calls.push({ url: String(input), body: JSON.parse(String(init?.body)) });
+      return new Response(JSON.stringify({ id: "p1" }));
+    };
+    await createPermission("t", "f1", { role: "writer", type: "user", target: "a@example.com" }, false, fetchImpl);
+    await createPermission("t", "f1", { role: "reader", type: "domain", target: "example.com" }, true, fetchImpl);
+    expect(calls[0]?.body).toEqual({ role: "writer", type: "user", emailAddress: "a@example.com" });
+    expect(calls[0]?.url).toContain("sendNotificationEmail=false");
+    expect(calls[1]?.body).toEqual({ role: "reader", type: "domain", domain: "example.com" });
+    expect(calls[1]?.url).not.toContain("sendNotificationEmail");
+  });
+});

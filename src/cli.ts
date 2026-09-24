@@ -14,6 +14,7 @@
 import { parseArgs } from "node:util";
 import { defaultDeps, handleAuthStart, handleGcloudSetup, handleImportClientSecret, handleStatus, handleUpload, waitForLogin } from "./core.js";
 import { DriveliftError } from "./errors.js";
+import type { ShareSpec } from "./drive.js";
 import { CONVERT_MODES, type ConvertMode } from "./mime.js";
 import { runServer } from "./server.js";
 import type { Status } from "./status.js";
@@ -31,7 +32,11 @@ Usage:
                                          (without --yes: show the plan only)
   drivelift upload <file> [options]         upload (and convert) a file, print its URL
       --folder <id>    destination folder ID
+      --folder-path <a/b>  find or create folders (drivelift-made) under --folder or My Drive
       --name <name>    name in Drive
+      --share <role:type[:target]>  grant access; repeatable. e.g. reader:domain:example.com,
+                       writer:user:alice@example.com, reader:anyone (public link)
+      --notify         email user/group shares
       --convert <mode> auto | none | spreadsheet | document | presentation (default auto)
       --json           print the full result as JSON
   drivelift --help | --version
@@ -52,11 +57,22 @@ function parseUploadArgsRaw(args: string[]) {
     allowPositionals: true,
     options: {
       folder: { type: "string" },
+      "folder-path": { type: "string" },
+      share: { type: "string", multiple: true },
+      notify: { type: "boolean", default: false },
       name: { type: "string" },
       convert: { type: "string" },
       json: { type: "boolean", default: false },
     },
   });
+}
+
+/** "role:type[:target]" を ShareSpec にする。検証は core 側(validateShare)に任せる。 */
+export function parseShareArg(arg: string): ShareSpec {
+  const [role, type, ...rest] = arg.split(":");
+  const target = rest.join(":");
+  if (!role || !type) throw new DriveliftError(`--share must be role:type[:target] (got "${arg}").`);
+  return { role: role as ShareSpec["role"], type: type as ShareSpec["type"], ...(target ? { target } : {}) };
 }
 
 function formatStatus(status: Status): string {
@@ -150,14 +166,20 @@ export async function main(argv: string[]): Promise<number> {
         if (values.convert !== undefined && !(CONVERT_MODES as readonly string[]).includes(values.convert)) {
           throw new DriveliftError(`--convert must be one of ${CONVERT_MODES.join(", ")}.`);
         }
+        const share = (values.share ?? []).map(parseShareArg);
         const result = await handleUpload(deps, {
           path: file,
+          ...(values["folder-path"] === undefined ? {} : { folder_path: values["folder-path"] }),
+          ...(share.length > 0 ? { share } : {}),
+          ...(values.notify ? { notify: true } : {}),
           ...(values.name === undefined ? {} : { name: values.name }),
           ...(values.folder === undefined ? {} : { folder_id: values.folder }),
           ...(values.convert === undefined ? {} : { convert: values.convert as ConvertMode }),
         });
         process.stdout.write(values.json ? `${JSON.stringify(result, null, 2)}\n` : `${result.url}\n`);
-        return 0;
+        const failedShares = result.shared.filter((s) => !s.ok);
+        for (const s of failedShares) process.stderr.write(`share failed: ${s.role}:${s.type}${s.target ? `:${s.target}` : ""} (${s.error ?? "unknown"})\n`);
+        return failedShares.length > 0 ? 3 : 0;
       }
       default:
         process.stderr.write(`unknown command: ${command}\n\n${USAGE}`);

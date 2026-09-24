@@ -140,7 +140,7 @@ describe("handleUpload", () => {
     });
     const result = await handleUpload(deps, { path: file, folder_id: "F" });
     expect(metadata).toEqual({ name: "report", mimeType: "application/vnd.google-apps.spreadsheet", parents: ["F"] });
-    expect(result).toEqual({ id: "f1", name: "report", mimeType: "application/vnd.google-apps.spreadsheet", url: "https://docs.google.com/spreadsheets/d/f1/edit", converted_to: "application/vnd.google-apps.spreadsheet", account: "me@example.com" });
+    expect(result).toEqual({ id: "f1", name: "report", mimeType: "application/vnd.google-apps.spreadsheet", url: "https://docs.google.com/spreadsheets/d/f1/edit", converted_to: "application/vnd.google-apps.spreadsheet", account: "me@example.com", folder_id: "F", folders_created: [], shared: [] });
   });
 
   it("folder_id 指定で 404 なら drive.file の制約を説明する", async () => {
@@ -153,6 +153,44 @@ describe("handleUpload", () => {
       return n === 1 ? new Response(JSON.stringify({ error: { message: "File not found: F" } }), { status: 404 }) : undefined;
     });
     await expect(handleUpload(deps, { path: file, folder_id: "F" })).rejects.toThrow(/drive\.file scope/);
+  });
+
+  it("folder_path でフォルダを用意してから置き、共有は1件ずつ成否を返す(失敗してもアップロードは成功扱い)", async () => {
+    saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+    const file = join(dir, "r.csv");
+    writeFileSync(file, "a,b");
+    let metadata: Record<string, unknown> | undefined;
+    const deps = makeDeps(dir, ENV_CREDS, (url, init) => {
+      if (url.includes("/drive/v3/files?q=")) return new Response(JSON.stringify({ files: [] }));
+      if (url.includes("/drive/v3/files?fields=id")) return new Response(JSON.stringify({ id: "fold-1" }));
+      if (url.includes("/upload/drive/v3/files")) {
+        metadata = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(null, { headers: { Location: "https://upload.test/s" } });
+      }
+      if (url === "https://upload.test/s") return new Response(JSON.stringify({ id: "f9" }));
+      if (url.includes("/permissions")) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return body["type"] === "domain" ? new Response(JSON.stringify({ id: "p" })) : new Response(JSON.stringify({ error: { message: "Bad Request. User message: invalid sharing request" } }), { status: 400 });
+      }
+      return undefined;
+    });
+    const r = await handleUpload(deps, { path: file, folder_path: "Reports", share: [{ role: "reader", type: "domain", target: "example.com" }, { role: "writer", type: "user", target: "x@example.com" }] });
+    expect(metadata?.["parents"]).toEqual(["fold-1"]);
+    expect(r.folder_id).toBe("fold-1");
+    expect(r.folders_created).toEqual(["Reports"]);
+    expect(r.shared).toEqual([
+      { role: "reader", type: "domain", target: "example.com", ok: true },
+      expect.objectContaining({ role: "writer", type: "user", target: "x@example.com", ok: false }),
+    ]);
+  });
+
+  it("共有指定が不正なら何も作らずに失敗する", async () => {
+    saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+    const file = join(dir, "r.csv");
+    writeFileSync(file, "a,b");
+    const deps = makeDeps(dir, ENV_CREDS, () => undefined);
+    await expect(handleUpload(deps, { path: file, share: [{ role: "reader", type: "user", target: "not-an-email" }] })).rejects.toThrow(/email/);
+    expect(deps.calls).toHaveLength(0);
   });
 
   it("API 未有効化は api_disabled の Status に変換される", async () => {

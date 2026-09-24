@@ -18,6 +18,7 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import { cancelPendingLogin, DEFAULT_AUTH_WAIT_SECONDS, defaultDeps, handleAuthStart, handleAuthStatus, handleGcloudSetup, handleImportClientSecret, handleStatus, handleUpload, MAX_AUTH_WAIT_SECONDS, type Deps } from "./core.js";
 import { DriveliftError } from "./errors.js";
+import { SHARE_ROLES, SHARE_TYPES, type ShareRole, type ShareType } from "./drive.js";
 import { CONVERT_MODES } from "./mime.js";
 import { resolvePackageVersion } from "./version.js";
 
@@ -142,22 +143,39 @@ export function createServer(deps: Deps = defaultDeps()): McpServer {
       description:
         "Upload a local file to Google Drive and return its URL. By default (convert: auto) spreadsheets (xlsx/csv/tsv/ods) become Google Sheets, " +
         "documents (docx/md/txt/html/rtf/odt) become Google Docs, and slides (pptx/odp) become Google Slides via Drive's own import, which carries over most formatting. " +
-        "Other files are stored as-is. Files go to My Drive root unless folder_id is given. If drivelift is not set up, the error carries next_steps to relay to the user.",
+        "Other files are stored as-is. Destination: My Drive root by default; folder_path (e.g. \"Reports/2026-09\") finds or creates folders that drivelift made, optionally under folder_id. " +
+        "share grants access to the new file (user/group by email, domain, or anyone-with-link) — set it only when the user asked for it, and never use type anyone unless the user explicitly asked to make the file public. " +
+        "Per-share results come back in shared; a failed share does not undo the upload. If drivelift is not set up, the error carries next_steps to relay to the user.",
       inputSchema: z.object({
         path: z.string().describe("Local file path (absolute, or relative to the server's working directory)"),
         name: z.string().optional().describe("Name in Drive. Default: the file name (extension dropped when converting)"),
         folder_id: z.string().optional().describe("Destination folder ID (the part after /folders/ in the folder URL). Caution: with the drive.file scope, folders that drivelift did not create are usually invisible to it and Drive returns 404; omit it to upload to My Drive root."),
+        folder_path: z.string().optional().describe("Folder path like \"Reports/2026-09\", found or created under folder_id (or My Drive root). Only folders drivelift created are reused (drive.file scope)."),
         convert: z.enum(CONVERT_MODES).optional().describe("auto (default) / none / spreadsheet / document / presentation"),
+        share: z
+          .array(
+            z.object({
+              role: z.enum(SHARE_ROLES as [ShareRole, ...ShareRole[]]).describe("reader / commenter / writer"),
+              type: z.enum(SHARE_TYPES as [ShareType, ...ShareType[]]).describe("user / group (target = email), domain (target = domain name), anyone (anyone with the link; no target)"),
+              target: z.string().optional(),
+            }),
+          )
+          .optional()
+          .describe("Permissions to add to the uploaded file. Only when the user asked for it."),
+        notify: z.boolean().optional().describe("Send Google's notification email to user/group shares. Default false."),
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
-    async ({ path, name, folder_id, convert }) =>
+    async ({ path, name, folder_id, folder_path, convert, share, notify }) =>
       run(() =>
         handleUpload(deps, {
           path,
           ...(name === undefined ? {} : { name }),
           ...(folder_id === undefined ? {} : { folder_id }),
+          ...(folder_path === undefined ? {} : { folder_path }),
           ...(convert === undefined ? {} : { convert }),
+          ...(share === undefined ? {} : { share: share.map((s) => ({ role: s.role, type: s.type, ...(s.target === undefined ? {} : { target: s.target }) })) }),
+          ...(notify === undefined ? {} : { notify }),
         }),
       ),
   );

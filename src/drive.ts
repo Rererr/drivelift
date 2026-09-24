@@ -126,3 +126,95 @@ export async function uploadToDrive(req: UploadRequest): Promise<DriveFile> {
     webViewLink: file.webViewLink ?? `https://drive.google.com/open?id=${file.id}`,
   };
 }
+
+// ---- folders ------------------------------------------------------------
+
+const FOLDER_MIME = "application/vnd.google-apps.folder";
+
+function escapeQuery(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
+/** "a/b/c" を分解する。空の要素("a//b"・先頭末尾の /)は無視する。 */
+export function splitFolderPath(path: string): string[] {
+  return path.split("/").map((p) => p.trim()).filter((p) => p.length > 0);
+}
+
+/**
+ * parentId(省略時はマイドライブ直下)の下に folderPath のフォルダを順に探し、無ければ作る。末端のフォルダ ID を返す。
+ * drive.file スコープでは drivelift が作ったフォルダしか検索に出ないので、「探す」は実質「以前 drivelift が作ったものを再利用する」になる。
+ */
+export async function ensureFolderPath(accessToken: string, folderPath: string, parentId: string | undefined, fetchImpl: FetchLike): Promise<{ id: string; created: string[] }> {
+  const parts = splitFolderPath(folderPath);
+  if (parts.length === 0) throw new DriveliftError("folder_path is empty.");
+  let parent = parentId ?? "root";
+  const created: string[] = [];
+  for (const name of parts) {
+    const q = `mimeType='${FOLDER_MIME}' and name='${escapeQuery(name)}' and '${escapeQuery(parent)}' in parents and trashed=false`;
+    const list = await fetchImpl(`${API_BASE}/files?q=${encodeURIComponent(q)}&fields=files(id)&pageSize=1&supportsAllDrives=true&includeItemsFromAllDrives=true`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!list.ok) throw new DriveRequestError(await failureOf(list));
+    const found = ((await list.json()) as { files?: Array<{ id?: string }> }).files?.[0]?.id;
+    if (found) {
+      parent = found;
+      continue;
+    }
+    const res = await fetchImpl(`${API_BASE}/files?fields=id&supportsAllDrives=true`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json; charset=UTF-8" },
+      body: JSON.stringify({ name, mimeType: FOLDER_MIME, parents: [parent] }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) throw new DriveRequestError(await failureOf(res));
+    const id = ((await res.json()) as { id?: string }).id;
+    if (!id) throw new DriveliftError(`Drive created folder "${name}" but returned no id.`);
+    created.push(name);
+    parent = id;
+  }
+  return { id: parent, created };
+}
+
+// ---- permissions ----------------------------------------------------------
+
+export type ShareRole = "reader" | "commenter" | "writer";
+export type ShareType = "user" | "group" | "domain" | "anyone";
+export const SHARE_ROLES: readonly ShareRole[] = ["reader", "commenter", "writer"];
+export const SHARE_TYPES: readonly ShareType[] = ["user", "group", "domain", "anyone"];
+
+export interface ShareSpec {
+  role: ShareRole;
+  type: ShareType;
+  /** user/group はメールアドレス、domain はドメイン名。anyone では使わない。 */
+  target?: string;
+}
+
+export function validateShare(spec: ShareSpec): void {
+  if (!SHARE_ROLES.includes(spec.role)) throw new DriveliftError(`share role must be one of ${SHARE_ROLES.join(", ")}.`);
+  if (!SHARE_TYPES.includes(spec.type)) throw new DriveliftError(`share type must be one of ${SHARE_TYPES.join(", ")}.`);
+  if (spec.type === "anyone") {
+    if (spec.target) throw new DriveliftError('share type "anyone" takes no target.');
+    return;
+  }
+  if (!spec.target) throw new DriveliftError(`share type "${spec.type}" needs a target (${spec.type === "domain" ? "domain name" : "email address"}).`);
+  if (spec.type === "domain" ? spec.target.includes("@") : !spec.target.includes("@")) {
+    throw new DriveliftError(`share target "${spec.target}" does not look like ${spec.type === "domain" ? "a domain name" : "an email address"}.`);
+  }
+}
+
+export async function createPermission(accessToken: string, fileId: string, spec: ShareSpec, notify: boolean, fetchImpl: FetchLike): Promise<{ id: string }> {
+  const body: Record<string, unknown> = { role: spec.role, type: spec.type };
+  if (spec.type === "user" || spec.type === "group") body["emailAddress"] = spec.target;
+  if (spec.type === "domain") body["domain"] = spec.target;
+  // 通知メールは user/group にだけ意味がある(他の種類に付けると API が拒否する場合がある)
+  const notifyParam = spec.type === "user" || spec.type === "group" ? `&sendNotificationEmail=${notify}` : "";
+  const res = await fetchImpl(`${API_BASE}/files/${encodeURIComponent(fileId)}/permissions?fields=id&supportsAllDrives=true${notifyParam}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json; charset=UTF-8" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) throw new DriveRequestError(await failureOf(res));
+  return { id: ((await res.json()) as { id?: string }).id ?? "" };
+}
