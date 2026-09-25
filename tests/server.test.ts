@@ -57,6 +57,23 @@ describe("server.ts", () => {
     await client.close();
   });
 
+  it("upload の replace_id は core まで渡り、置き先との併用は弾かれる", async () => {
+    const client = await connectedClient();
+    const file = join(dir, "file.xlsx");
+    writeFileSync(file, "x");
+    const result = await client.callTool({ name: "upload", arguments: { path: file, replace_id: "f1", folder_id: "F" } });
+    expect(result.isError).toBe(true);
+    expect((result.content as Array<{ type: string; text: string }>)[0]?.text).toMatch(/cannot be combined/);
+    await client.close();
+  });
+
+  it("upload は破壊的な操作として宣言する(replace_id で中身を置き換えるため)", async () => {
+    const client = await connectedClient();
+    const { tools } = await client.listTools();
+    expect(tools.find((t) => t.name === "upload")?.annotations?.destructiveHint).toBe(true);
+    await client.close();
+  });
+
   it("status は isError なしで state を返す", async () => {
     const client = await connectedClient();
     const result = await client.callTool({ name: "status", arguments: {} });

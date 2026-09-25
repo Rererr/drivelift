@@ -9,7 +9,7 @@
  *   drivelift import-secret [path]  client_secret JSON を取り込む(省略時は ~/Downloads の候補を列挙)
  *   drivelift setup-gcloud [--project ID] [--yes]  gcloud で手順 1-2 を実行(--yes なしは計画表示)
  *   drivelift upload <file> [--folder ID] [--folder-path A/B] [--name N] [--convert MODE]
- *                    [--share ROLE:TYPE[:TARGET]]... [--notify] [--json]
+ *                    [--share ROLE:TYPE[:TARGET]]... [--notify] [--replace ID] [--json]
  *
  * 終了コード: 0 成功 / 1 実行時エラー / 2 使い方の誤り・未導入(doctor) / 3 アップロードは成功したが共有の一部が失敗
  *                                アップロードして URL を出力(--json で全項目)
@@ -42,6 +42,8 @@ Usage:
       --share <role:type[:target]>  grant access; repeatable. e.g. reader:domain:example.com,
                        writer:user:alice@example.com, reader:anyone (public link)
       --notify         email user/group shares
+      --replace <id>   replace the contents of an earlier upload (same URL) instead of
+                       creating a new file; refused if trashed, renamed or a different kind
       --convert <mode> auto | none | spreadsheet | document | presentation (default auto)
       --json           print the full result as JSON
   drivelift --help | --version
@@ -72,6 +74,7 @@ function parseUploadArgsRaw(args: string[]) {
       "folder-path": { type: "string" },
       share: { type: "string", multiple: true },
       notify: { type: "boolean", default: false },
+      replace: { type: "string" },
       name: { type: "string" },
       convert: { type: "string" },
       json: { type: "boolean", default: false },
@@ -188,6 +191,7 @@ export async function main(argv: string[]): Promise<number> {
           ...(values["folder-path"] === undefined ? {} : { folder_path: values["folder-path"] }),
           ...(share.length > 0 ? { share } : {}),
           ...(values.notify ? { notify: true } : {}),
+          ...(values.replace === undefined ? {} : { replace_id: values.replace }),
           ...(values.name === undefined ? {} : { name: values.name }),
           ...(values.folder === undefined ? {} : { folder_id: values.folder }),
           ...(values.convert === undefined ? {} : { convert: values.convert as ConvertMode }),

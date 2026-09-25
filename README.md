@@ -74,6 +74,9 @@ Node.js 22.13 以降が必要。
 | `convert` | `auto`（既定）/ `none` / `spreadsheet` / `document` / `presentation` |
 | `share` | アップロードしたファイルに付ける共有設定のリスト。各要素は `role`（`reader` / `commenter` / `writer`）、`type`（`user` / `group` / `domain` / `anyone`）、`target`（user・group はメールアドレス、domain はドメイン名、anyone は不要） |
 | `notify` | user・group への共有で Google の通知メールを送るか。既定は送らない |
+| `replace_id` | 新しく作らず、以前 drivelift で上げたファイル（ID）の中身を差し替える。URL と共有設定はそのまま残る。`folder_id`・`folder_path` とは併用できない |
+
+`replace_id` は同じレポートを直して配り直すためのもの。差し替えは中身の全置き換えで、Sheets 上で直接加えた編集やコメントは消える（以前の版は Drive の版の履歴に残る）。シートの内部 ID も変わるので、特定のタブを指すリンク（`#gid=`）は切れる。取り違えを防ぐため、差し替え先がゴミ箱にあるとき、今回のアップロード名と名前が違うとき、種類が違うとき（スプレッドシートにドキュメントを上げる等）は、送信せずに拒否する。drive.file の範囲なので、drivelift が作っていないファイルは差し替えられない。
 
 共有は、利用者が指示したときだけ付ける前提で、ツールの説明にもそう書いてある。`anyone` は「リンクを知っている全員」になり外部公開と同じなので、利用者が明示したときだけ使う。共有の一部が失敗してもアップロードは取り消さず、結果の `shared` に1件ずつ成否を返す。
 
@@ -88,7 +91,7 @@ drivelift login                 ブラウザでログイン（完了まで待つ
 drivelift import-secret [path]  クライアント JSON の取り込み
 drivelift setup-gcloud [--project ID] [--yes]  gcloud で手順 1・2 を実行（--yes なしは計画表示）
 drivelift upload <file> [--folder ID] [--folder-path A/B] [--name N] [--convert MODE]
-                 [--share ROLE:TYPE[:TARGET]]... [--notify] [--json]
+                 [--share ROLE:TYPE[:TARGET]]... [--notify] [--replace ID] [--json]
 ```
 
 `upload` は既定で URL だけを標準出力に出すので、スクリプトから拾いやすい。`--share` は繰り返し指定できる（例: `--share reader:domain:example.com --share writer:user:alice@example.com`）。共有に1件でも失敗すると、URL は出したうえで終了コード 3 を返す。
@@ -116,10 +119,11 @@ drivelift upload <file> [--folder ID] [--folder-path A/B] [--name N] [--convert 
 
 ## 制約と注意
 
-- **`upload` を常時許可すると、共有も常時許可したことになる。** `share` を使えば、1回の呼び出しで任意の外部アドレスやドメインに権限を付けられる（0.2.0 から）。ホストのツール許可で upload を「常に許可」にしている場合、プロンプトインジェクションでファイルを外部に共有される余地がある。0.1.0 で常に許可した人も、`drivelift@0` を指定していれば自動で 0.2.0 に上がる。気になる場合は upload を毎回確認する設定にする
+- **`upload` を常時許可すると、共有も常時許可したことになる。** `share` を使えば、1回の呼び出しで任意の外部アドレスやドメインに権限を付けられる（0.2.0 から）。ホストのツール許可で upload を「常に許可」にしている場合、プロンプトインジェクションでファイルを外部に共有される余地がある。0.1.0 で常に許可した人も、`drivelift@0` を指定していれば自動で新しい版（0.2.0 以降。0.3.0 からは差し替え `replace_id` も）に上がる。`upload` は MCP の注釈で破壊的操作（`destructiveHint: true`）と宣言している。気になる場合は upload を毎回確認する設定にする
 
 - `folder_id` には、ログインしたアカウントが編集できるフォルダなら何でも指定できる。drivelift が作っていないフォルダや共有ドライブ内のフォルダでもよい（2026-09-25 に共有ドライブで確認）。ただし drive.file の権限では、そのフォルダの中身は見えない。そのため `folder_path` で再利用できるのは drivelift が作ったフォルダだけで、他の人や手で作った同名フォルダがあっても、別に同名のフォルダを作る
-- 同名ファイルがあっても上書きせず、新しいファイルを作る（Drive の既定どおり）
+- 同名ファイルがあっても上書きせず、新しいファイルを作る（Drive の既定どおり）。上書きは `replace_id` で ID を明示したときだけ
+- `upload` を常時許可していると、プロンプトインジェクションで drivelift が作ったファイルを別の中身に差し替えられる余地がある（`replace_id`、0.3.0 から）。drivelift が作ったもの以外には届かず、以前の版は版の履歴から戻せる
 - `token.json` は暗号化していない。マシンを共有する環境では `DRIVELIFT_CONFIG_DIR` を保護された場所に向ける
 - Google Workspace の管理者がサードパーティアプリの API アクセスを制限している場合、「内部」クライアントでも認可できないことがある
 

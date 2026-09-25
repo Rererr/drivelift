@@ -4,6 +4,8 @@
  * - about.get: ログイン確認とメールアドレス取得。scope drive.file で呼べる
  * - files.create(resumable): メタデータ送信 → セッション URL へ本体 PUT の2段。
  *   metadata.mimeType に Google ネイティブ形式を入れると Drive 側で変換される
+ * - files.update(resumable): 同じ2段で既存ファイルの中身を差し替える(ID・URL・共有は保たれる)。
+ *   Docs/Sheets/Slides への変換付き更新は中身の全置き換えになる(Drive API の仕様)
  * - 失敗は classifyDriveFailure で「API 未有効化 / 認証切れ / 対象なし / その他」に分類し、
  *   上位が Status(次の一手)に変換できるようにする
  */
@@ -84,7 +86,30 @@ export interface UploadRequest {
   /** Google ネイティブ形式へ変換するなら その mimeType、そのまま置くなら null。 */
   targetMime: string | null;
   folderId?: string;
+  /** 指定すると新規作成せず、このファイルの中身を差し替える。 */
+  replaceId?: string;
   fetchImpl: FetchLike;
+}
+
+export interface DriveFileMeta {
+  id: string;
+  name: string;
+  mimeType: string;
+  trashed: boolean;
+}
+
+/** drive.file では drivelift が作ったファイル(と利用者が明示的に開いたファイル)だけが見える。それ以外は 404。 */
+export async function getFileMeta(accessToken: string, fileId: string, fetchImpl: FetchLike): Promise<DriveFileMeta> {
+  const res = await fetchImpl(`${API_BASE}/files/${encodeURIComponent(fileId)}?fields=id,name,mimeType,trashed&supportsAllDrives=true`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) throw new DriveRequestError(await failureOf(res));
+  const body = (await res.json()) as Partial<DriveFileMeta>;
+  if (typeof body.id !== "string" || typeof body.name !== "string" || typeof body.mimeType !== "string") {
+    throw new DriveliftError(`Drive returned incomplete metadata for ${fileId}: ${JSON.stringify(body)}`);
+  }
+  return { id: body.id, name: body.name, mimeType: body.mimeType, trashed: body.trashed === true };
 }
 
 export async function uploadToDrive(req: UploadRequest): Promise<DriveFile> {
@@ -93,8 +118,9 @@ export async function uploadToDrive(req: UploadRequest): Promise<DriveFile> {
   if (req.targetMime) metadata["mimeType"] = req.targetMime;
   if (req.folderId) metadata["parents"] = [req.folderId];
 
-  const init = await req.fetchImpl(`${UPLOAD_BASE}/files?uploadType=resumable&supportsAllDrives=true&fields=${FILE_FIELDS}`, {
-    method: "POST",
+  const target = req.replaceId ? `/files/${encodeURIComponent(req.replaceId)}` : "/files";
+  const init = await req.fetchImpl(`${UPLOAD_BASE}${target}?uploadType=resumable&supportsAllDrives=true&fields=${FILE_FIELDS}`, {
+    method: req.replaceId ? "PATCH" : "POST",
     headers: {
       Authorization: `Bearer ${req.accessToken}`,
       "Content-Type": "application/json; charset=UTF-8",

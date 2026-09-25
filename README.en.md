@@ -74,6 +74,9 @@ From then on, just call `upload`. Calling `upload` while something is missing re
 | `convert` | `auto` (default) / `none` / `spreadsheet` / `document` / `presentation` |
 | `share` | Permissions to add to the uploaded file. Each item has `role` (`reader` / `commenter` / `writer`), `type` (`user` / `group` / `domain` / `anyone`) and `target` (email for user/group, domain name for domain, none for anyone) |
 | `notify` | Send Google's notification email for user/group shares. Default: no |
+| `replace_id` | Instead of creating a new file, replace the contents of an earlier drivelift upload (by ID). URL and sharing stay the same. Cannot be combined with `folder_id` / `folder_path` |
+
+`replace_id` is for re-publishing a revised report. The whole content is replaced, so edits and comments made directly in Sheets are lost (earlier versions stay in Drive's version history), and tab IDs change, so links to a specific tab (`#gid=`) break. To avoid replacing the wrong file, drivelift refuses without sending anything when the target is in the trash, has a different name than this upload would get, or is a different kind (e.g. a Doc for a spreadsheet upload). Under drive.file, files drivelift did not create cannot be replaced.
 
 Sharing is meant to be set only when the user asks for it, and the tool description says so. `anyone` means anyone with the link, i.e. public; use it only when the user explicitly asks. A failed share does not undo the upload; each share's result comes back in `shared`.
 
@@ -88,7 +91,7 @@ drivelift login                 sign in (waits for completion)
 drivelift import-secret [path]  import the client JSON
 drivelift setup-gcloud [--project ID] [--yes]  steps 1-2 via gcloud (plan only without --yes)
 drivelift upload <file> [--folder ID] [--folder-path A/B] [--name N] [--convert MODE]
-                 [--share ROLE:TYPE[:TARGET]]... [--notify] [--json]
+                 [--share ROLE:TYPE[:TARGET]]... [--notify] [--replace ID] [--json]
 ```
 
 `upload` prints only the URL by default, so scripts can capture it. `--share` is repeatable (e.g. `--share reader:domain:example.com --share writer:user:alice@example.com`). If any share fails, the URL is still printed and the exit code is 3.
@@ -116,10 +119,11 @@ One person can create the OAuth client and hand the downloaded JSON to the team.
 
 ## Limitations
 
-- **Always-allowing `upload` also always-allows sharing.** With `share`, one call can grant access to any outside address or domain (since 0.2.0). If your host is set to always allow upload, a prompt injection could share files externally. Users who always-allowed it on 0.1.0 get 0.2.0 automatically via `drivelift@0`. If that worries you, set upload to ask every time
+- **Always-allowing `upload` also always-allows sharing.** With `share`, one call can grant access to any outside address or domain (since 0.2.0). If your host is set to always allow upload, a prompt injection could share files externally. Users who always-allowed it on 0.1.0 get newer versions automatically via `drivelift@0` (0.2.0 and later; since 0.3.0 that includes `replace_id`). `upload` is annotated as destructive (`destructiveHint: true`). If that worries you, set upload to ask every time
 
 - `folder_id` accepts any folder the signed-in account can edit, including folders drivelift did not create and folders in shared drives (confirmed on a shared drive, 2026-09-25). With `drive.file`, drivelift cannot see those folders' contents, so `folder_path` only reuses folders drivelift created; it makes its own folder even if a same-named one made by someone else exists
-- Existing files with the same name are not overwritten; a new file is created (Drive's default)
+- Existing files with the same name are not overwritten; a new file is created (Drive's default). Overwriting happens only with an explicit `replace_id`
+- If `upload` is always allowed, a prompt injection could replace a drivelift-made file with other content (`replace_id`, since 0.3.0). It cannot reach files drivelift did not create, and earlier versions can be restored from version history
 - `token.json` is not encrypted. On shared machines point `DRIVELIFT_CONFIG_DIR` at a protected location
 - If a Google Workspace admin restricts third-party API access, even an Internal client may be blocked from authorizing
 

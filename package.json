@@ -1,6 +1,6 @@
 {
   "name": "drivelift",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "mcpName": "io.github.Rererr/drivelift",
   "description": "Lift local files into Google Drive as native Docs/Sheets/Slides — a bring-your-own-OAuth-client MCP server and CLI for LLM agents (Google Drive only, drive.file scope, guided setup).",
   "type": "module",

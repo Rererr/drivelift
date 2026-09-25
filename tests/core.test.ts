@@ -140,7 +140,7 @@ describe("handleUpload", () => {
     });
     const result = await handleUpload(deps, { path: file, folder_id: "F" });
     expect(metadata).toEqual({ name: "report", mimeType: "application/vnd.google-apps.spreadsheet", parents: ["F"] });
-    expect(result).toEqual({ id: "f1", name: "report", mimeType: "application/vnd.google-apps.spreadsheet", url: "https://docs.google.com/spreadsheets/d/f1/edit", converted_to: "application/vnd.google-apps.spreadsheet", account: "me@example.com", folder_id: "F", folders_created: [], shared: [] });
+    expect(result).toEqual({ id: "f1", name: "report", mimeType: "application/vnd.google-apps.spreadsheet", url: "https://docs.google.com/spreadsheets/d/f1/edit", converted_to: "application/vnd.google-apps.spreadsheet", account: "me@example.com", folder_id: "F", folders_created: [], shared: [], replaced: false });
   });
 
   it("folder_id 指定で 404 なら ID と編集権限の確認を案内する", async () => {
@@ -182,6 +182,84 @@ describe("handleUpload", () => {
       { role: "reader", type: "domain", target: "example.com", ok: true },
       expect.objectContaining({ role: "writer", type: "user", target: "x@example.com", ok: false }),
     ]);
+  });
+
+  describe("replace_id", () => {
+    const SHEET = "application/vnd.google-apps.spreadsheet";
+    function replaceDeps(meta: Record<string, unknown> | null) {
+      const methods: string[] = [];
+      const deps = makeDeps(dir, ENV_CREDS, (url, init) => {
+        if (url.startsWith("https://www.googleapis.com/drive/v3/files/f1?")) {
+          return meta ? new Response(JSON.stringify(meta)) : new Response(JSON.stringify({ error: { message: "File not found: f1." } }), { status: 404 });
+        }
+        if (url.includes("/upload/drive/v3/files")) {
+          methods.push(`${init?.method} ${url.split("?")[0]}`);
+          return new Response(null, { headers: { Location: "https://upload.test/s" } });
+        }
+        if (url === "https://upload.test/s") return new Response(JSON.stringify({ id: "f1", name: "report", mimeType: SHEET, webViewLink: "https://docs.google.com/spreadsheets/d/f1/edit" }));
+        return undefined;
+      });
+      return { deps, methods };
+    }
+    let file: string;
+    beforeEach(() => {
+      saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+      file = join(dir, "report.xlsx");
+      writeFileSync(file, "x");
+    });
+
+    it("同名・同種・ゴミ箱外のファイルなら新規作成せず PATCH で中身を差し替え、同じ ID を返す", async () => {
+      const { deps, methods } = replaceDeps({ id: "f1", name: "report", mimeType: SHEET, trashed: false });
+      const r = await handleUpload(deps, { path: file, replace_id: "f1" });
+      expect(methods).toEqual(["PATCH https://www.googleapis.com/upload/drive/v3/files/f1"]);
+      expect(r).toMatchObject({ id: "f1", url: "https://docs.google.com/spreadsheets/d/f1/edit", replaced: true });
+    });
+
+    it.each([
+      ["ゴミ箱にある", { id: "f1", name: "report", mimeType: SHEET, trashed: true }, /in the trash/],
+      ["名前が違う(md をコピーした別レポート)", { id: "f1", name: "other-report", mimeType: SHEET, trashed: false }, /named "other-report"/],
+      ["種類が違う", { id: "f1", name: "report", mimeType: "application/vnd.google-apps.document", trashed: false }, /same kind/],
+      ["見えない(drivelift が作っていない・削除済み)", null, /can only replace files it created/],
+    ])("%s ファイルは送信せずに拒否する", async (_label, meta, message) => {
+      const { deps, methods } = replaceDeps(meta);
+      await expect(handleUpload(deps, { path: file, replace_id: "f1" })).rejects.toThrow(message);
+      expect(methods).toEqual([]);
+    });
+
+    it("名前は Unicode 正規化(NFC/NFD)の違いを同じ名前として扱う", async () => {
+      const nfd = "レポート".normalize("NFD");
+      writeFileSync(join(dir, `${"レポート".normalize("NFC")}.xlsx`), "x");
+      const { deps, methods } = replaceDeps({ id: "f1", name: nfd, mimeType: SHEET, trashed: false });
+      await handleUpload(deps, { path: join(dir, `${"レポート".normalize("NFC")}.xlsx`), replace_id: "f1" });
+      expect(methods).toHaveLength(1);
+    });
+
+    it("変換しないファイルは、元の mimeType と一致すれば差し替える", async () => {
+      const png = join(dir, "shot.png");
+      writeFileSync(png, "x");
+      const { deps, methods } = replaceDeps({ id: "f1", name: "shot.png", mimeType: "image/png", trashed: false });
+      await handleUpload(deps, { path: png, replace_id: "f1" });
+      expect(methods).toHaveLength(1);
+      const other = replaceDeps({ id: "f1", name: "shot.png", mimeType: "image/jpeg", trashed: false });
+      await expect(handleUpload(other.deps, { path: png, replace_id: "f1" })).rejects.toThrow(/same kind/);
+    });
+
+    it("確認の後で消されて差し替えが 404 になったら、フォルダではなく差し替え先が消えたと案内する", async () => {
+      const deps = makeDeps(dir, ENV_CREDS, (url) => {
+        if (url.startsWith("https://www.googleapis.com/drive/v3/files/f1?")) return new Response(JSON.stringify({ id: "f1", name: "report", mimeType: SHEET, trashed: false }));
+        if (url.includes("/upload/drive/v3/files")) return new Response(JSON.stringify({ error: { message: "File not found: f1." } }), { status: 404 });
+        return undefined;
+      });
+      await expect(handleUpload(deps, { path: file, replace_id: "f1" })).rejects.toThrow(/removed after drivelift checked it/);
+    });
+
+    it("置き先の指定との組み合わせと空の ID は Drive を呼ばずに弾く", async () => {
+      const { deps } = replaceDeps(null);
+      await expect(handleUpload(deps, { path: file, replace_id: "f1", folder_id: "F" })).rejects.toThrow(/cannot be combined/);
+      await expect(handleUpload(deps, { path: file, replace_id: "f1", folder_path: "A" })).rejects.toThrow(/cannot be combined/);
+      await expect(handleUpload(deps, { path: file, replace_id: " " })).rejects.toThrow(/replace_id is empty/);
+      expect(deps.calls).toHaveLength(0);
+    });
   });
 
   it("空の folder_id / folder_path と 21 件以上の share は何も呼ばずに弾く", async () => {

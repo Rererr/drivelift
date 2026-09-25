@@ -19,7 +19,7 @@ import {
   saveClientSecret,
   type ClientCredentials,
 } from "./config.js";
-import { createPermission, DriveRequestError, driveAbout, ensureFolderPath, MAX_SHARES, uploadToDrive, validateShare, type DriveFailure, type FetchLike, type ShareSpec } from "./drive.js";
+import { createPermission, DriveRequestError, driveAbout, ensureFolderPath, getFileMeta, MAX_SHARES, uploadToDrive, validateShare, type DriveFailure, type DriveFileMeta, type FetchLike, type ShareSpec } from "./drive.js";
 import { defaultExecGcloud, runGcloudSetup, type ExecGcloud, type GcloudSetupInput, type GcloudSetupResult } from "./gcloud.js";
 import { DriveliftError, DriveliftInputError } from "./errors.js";
 import { CONVERT_MODES, defaultDriveName, extensionOf, resolveTargetMime, sourceMimeFor, type ConvertMode } from "./mime.js";
@@ -267,6 +267,8 @@ export interface UploadInput {
   share?: ShareSpec[];
   /** user/group への共有で通知メールを送るか。既定 false。 */
   notify?: boolean;
+  /** 新規作成せず、このファイル(drivelift が作ったもの)の中身を差し替える。URL・共有は保たれる。 */
+  replace_id?: string;
 }
 
 export interface ShareOutcome {
@@ -287,6 +289,8 @@ export interface UploadResult {
   folder_id: string | null;
   folders_created: string[];
   shared: ShareOutcome[];
+  /** replace_id で既存ファイルを差し替えたなら true。 */
+  replaced: boolean;
 }
 
 export async function handleUpload(deps: Deps, input: UploadInput): Promise<UploadResult> {
@@ -301,6 +305,11 @@ export async function handleUpload(deps: Deps, input: UploadInput): Promise<Uplo
   if (input.folder_path !== undefined && input.folder_path.trim() === "") throw new DriveliftInputError("folder_path is empty. Omit it, or give a path like Reports/2026-09.");
   if ((input.share?.length ?? 0) > MAX_SHARES) throw new DriveliftInputError(`share accepts at most ${MAX_SHARES} entries.`);
   for (const spec of input.share ?? []) validateShare(spec);
+  if (input.replace_id !== undefined) {
+    if (input.replace_id.trim() === "") throw new DriveliftInputError("replace_id is empty. Omit it to create a new file.");
+    // 差し替えはファイルの場所を変えない。置き先の指定と組み合わせると、どちらが効いたか利用者が判断できない
+    if (input.folder_id !== undefined || input.folder_path !== undefined) throw new DriveliftInputError("replace_id cannot be combined with folder_id or folder_path: a replaced file stays where it is.");
+  }
 
   const creds = requireCreds(deps);
   const access = await getAccessToken(creds, deps.configDir, deps.fetchImpl, deps.now);
@@ -311,6 +320,7 @@ export async function handleUpload(deps: Deps, input: UploadInput): Promise<Uplo
   const name = input.name ?? defaultDriveName(filePath, targetMime !== null);
   let foldersCreated: string[] = [];
   try {
+    if (input.replace_id !== undefined) await checkReplaceTarget(access.accessToken, input.replace_id, name, targetMime ?? sourceMimeFor(ext), deps.fetchImpl);
     let folderId = input.folder_id;
     if (input.folder_path) {
       const folder = await ensureFolderPath(access.accessToken, input.folder_path, input.folder_id, deps.fetchImpl, (name) => foldersCreated.push(name));
@@ -323,6 +333,7 @@ export async function handleUpload(deps: Deps, input: UploadInput): Promise<Uplo
       sourceMime: sourceMimeFor(ext),
       targetMime,
       ...(folderId ? { folderId } : {}),
+      ...(input.replace_id !== undefined ? { replaceId: input.replace_id } : {}),
       fetchImpl: deps.fetchImpl,
     });
     // 共有はファイルができた後なので、1件の失敗で全体を失敗にしない(ファイルは残る)。件ごとの成否を返す
@@ -362,12 +373,13 @@ export async function handleUpload(deps: Deps, input: UploadInput): Promise<Uplo
       folder_id: folderId ?? null,
       folders_created: foldersCreated,
       shared,
+      replaced: input.replace_id !== undefined,
     };
   } catch (error) {
     // フォルダを作った後で失敗しても、作ったフォルダは残る。利用者が掃除できるよう伝える
     const leftover = foldersCreated.length > 0 ? ` (folders already created before the failure: ${foldersCreated.join("/")})` : "";
     try {
-      rethrowUploadError(deps, error);
+      rethrowUploadError(deps, error, input.replace_id !== undefined);
     } catch (e) {
       if (!leftover) throw e;
       if (e instanceof DriveliftError) throw new DriveliftError(`${e.message}${leftover}`, e.status);
@@ -377,10 +389,35 @@ export async function handleUpload(deps: Deps, input: UploadInput): Promise<Uplo
   }
 }
 
-function rethrowUploadError(deps: Deps, error: unknown): never {
+/**
+ * 差し替え先の取り違えを送信前に止める。ID を控えた md をコピーして別のレポートを作った場合(名前が違う)、
+ * ゴミ箱に入れたファイル(更新は成功するが誰も開けない)、種類の違うファイル(Sheets に docx 等)を拒否する。
+ */
+async function checkReplaceTarget(accessToken: string, fileId: string, name: string, expectedMime: string, fetchImpl: FetchLike): Promise<void> {
+  let meta: DriveFileMeta;
+  try {
+    meta = await getFileMeta(accessToken, fileId, fetchImpl);
+  } catch (error) {
+    if (error instanceof DriveRequestError && error.failure.kind === "not_found") {
+      throw new DriveliftInputError(`replace_id ${fileId} was not found. drivelift can only replace files it created itself (drive.file scope), and the file may have been deleted.`);
+    }
+    throw error;
+  }
+  if (meta.trashed) throw new DriveliftInputError(`replace_id ${fileId} ("${meta.name}") is in the trash. Restore it in Drive, or omit replace_id to create a new file.`);
+  // 見た目が同じでも NFC/NFD で別の文字列になる(macOS のファイル名は NFD になりうる)ので正規化して比べる
+  if (meta.name.normalize("NFC") !== name.normalize("NFC")) {
+    // 回避方法(名前の指定)は書かない。取り違え防止のガードなので、LLM が自動で再試行して外すのを誘わない
+    throw new DriveliftInputError(`replace_id ${fileId} is named "${meta.name}", but this upload would be named "${name}". Refusing to replace what may be a different file. Ask the user whether this is really the same document before retrying.`);
+  }
+  if (meta.mimeType !== expectedMime) throw new DriveliftInputError(`replace_id ${fileId} is ${meta.mimeType}, but this upload would become ${expectedMime}. A file can only be replaced with content of the same kind.`);
+}
+
+function rethrowUploadError(deps: Deps, error: unknown, replacing: boolean): never {
   if (error instanceof DriveRequestError) {
     const status = statusFromDriveFailure(deps, error.failure);
     if (status) throw new DriveliftError(error.message, status);
+    // 事前確認の後に消された・ゴミ箱を空にされた場合。folder_id は併用できないので、フォルダの案内は出さない
+    if (error.failure.kind === "not_found" && replacing) throw new DriveliftError(`Drive returned 404 while replacing (${error.failure.message}). The file was removed after drivelift checked it; omit replace_id to create a new file.`);
     if (error.failure.kind === "not_found") throw new DriveliftError(`Drive returned 404 (${error.failure.message}). If you passed folder_id: check that the ID is right (the part after /folders/ in the folder URL) and that the signed-in account can edit that folder. drivelift can create files in any folder the account can edit, even though it cannot list that folder's contents.`);
   }
   throw error;
