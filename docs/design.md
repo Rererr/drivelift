@@ -76,6 +76,7 @@ MCP サーバーと CLI は同じハンドラ（core.ts）を使う。外部依�
 - `folder_path` のフォルダは2回目に再利用される。マイドライブ直下（既定の corpora）と共有ドライブ内のフォルダの下（`corpora=allDrives`）の両方で確認。並べ替えは API の orderBy を使わず、全ページを取って手元で最古を選ぶ。検索が欠けた（incompleteSearch）うえで1件も無いときは、重複を避けるため作らずに止める
 - md → Docs は Markdown として解釈される（見出し・表になる）
 - `replace_id` での差し替え（2026-09-25）: ID・URL が変わらず、中身（本文・画像シートの画像・シート間リンク）が新しい版になり、domain の閲覧権限が残る。ゴミ箱のファイル・名前違い・drivelift が作っていないフォルダの ID は送信前に拒否される。他アプリが作ったファイルの ID と種類違いの拒否は実測していない（前者は drive.file の仕様で 404 になるはず、後者はユニットテストのみ）。名前は NFC に正規化して比べる。MCP の注釈は `destructiveHint: true` にした
+- `share_new_folder`（2026-09-28、マイドライブ内の既存フォルダの下）: 新しく作った末端フォルダに domain の閲覧権限が付き、組織内の別アカウントがフォルダの URL から中のファイルを開ける。組織外の個人アカウントでは権限なしの画面になる。同じパスで2回目を実行すると再利用になり、共有しない旨を stderr に出して終了コード 0
 
 ## 未検証（実アカウントで確かめる）
 
@@ -83,7 +84,7 @@ MCP サーバーと CLI は同じハンドラ（core.ts）を使う。外部依�
 4. Console の URL（`auth/overview`・`auth/clients/create`）は新 UI のもの。旧 UI に戻された場合は status.ts の 1 テーブルを直す
 6. `xlsm` → Sheets ほか、xlsx・csv・md 以外の変換（`about.importFormats` で確認できる）
 7. Windows での PowerShell 経由のブラウザ起動、Linux の xdg-open
-8. `share_new_folder` で共有ドライブ内・マイドライブのフォルダに domain 権限を付けられるか、そのフォルダの URL を組織内の別アカウントで開けるか
+8. `share_new_folder` で共有ドライブ内のフォルダに domain 権限を付けられるか（マイドライブでは確認済み）
 
 ## 今後
 
