@@ -73,12 +73,15 @@ Node.js 22.13 以降が必要。
 | `folder_path` | `テスト報告/2026-09` のようなフォルダのパス。`folder_id`（省略時はマイドライブ直下）の下で探し、無ければ作る。再利用されるのは drivelift が作ったフォルダだけ |
 | `convert` | `auto`（既定）/ `none` / `spreadsheet` / `document` / `presentation` |
 | `share` | アップロードしたファイルに付ける共有設定のリスト。各要素は `role`（`reader` / `commenter` / `writer`）、`type`（`user` / `group` / `domain` / `anyone`）、`target`（user・group はメールアドレス、domain はドメイン名、anyone は不要） |
+| `share_new_folder` | `folder_path` の末端フォルダを今回新しく作ったときだけ、`share` と同じ共有をそのフォルダにも付ける。再利用したフォルダと `folder_id` のフォルダには付けない。`share` と `folder_path` が必要 |
 | `notify` | user・group への共有で Google の通知メールを送るか。既定は送らない |
 | `replace_id` | 新しく作らず、以前 drivelift で上げたファイル（ID）の中身を差し替える。URL と共有設定はそのまま残る。`folder_id`・`folder_path` とは併用できない |
 
 `replace_id` は同じレポートを直して配り直すためのもの。差し替えは中身の全置き換えで、Sheets 上で直接加えた編集やコメントは消える（以前の版は Drive の版の履歴に残る）。シートの内部 ID も変わるので、特定のタブを指すリンク（`#gid=`）は切れる。取り違えを防ぐため、差し替え先がゴミ箱にあるとき、今回のアップロード名と名前が違うとき、種類が違うとき（スプレッドシートにドキュメントを上げる等）は、送信せずに拒否する。drive.file の範囲なので、drivelift が作っていないファイルは差し替えられない。
 
 共有は、利用者が指示したときだけ付ける前提で、ツールの説明にもそう書いてある。`anyone` は「リンクを知っている全員」になり外部公開と同じなので、利用者が明示したときだけ使う。共有の一部が失敗してもアップロードは取り消さず、結果の `shared` に1件ずつ成否を返す。
+
+`share_new_folder` は、PR ごと・日付ごとのフォルダをチームに URL で渡すためのもの。フォルダへの共有の成否は `folder_shared` に返る（付けなかったときは空）。共有するのは末端のフォルダ（結果の `folder_id`）だけで、途中の階層を新しく作っていてもそこには付けない。フォルダの共有は中身に継承されるので、**そのフォルダに後から置いたファイルも同じ相手に見える**。再利用したフォルダに付けないのは、以前置いたファイルまで見えるようになるのを防ぐため。そのため、この機能より前に作ったフォルダや、作成時に共有が失敗したフォルダは、次回以降も共有されない。必要なら Drive の画面で手動で共有する。
 
 `auto` の変換先: xlsx・xlsm・xls・ods・csv・tsv → スプレッドシート、docx・doc・odt・rtf・txt・md・html・htm → ドキュメント、pptx・ppt・odp → スライド。それ以外はそのまま置く。変換は Drive のインポート機能が行う。実機で確認したのは xlsx・csv（スプレッドシート）と md（見出しや表を解釈したドキュメント）で、ほかは Drive の対応形式に従う。
 
@@ -91,10 +94,10 @@ drivelift login                 ブラウザでログイン（完了まで待つ
 drivelift import-secret [path]  クライアント JSON の取り込み
 drivelift setup-gcloud [--project ID] [--yes]  gcloud で手順 1・2 を実行（--yes なしは計画表示）
 drivelift upload <file> [--folder ID] [--folder-path A/B] [--name N] [--convert MODE]
-                 [--share ROLE:TYPE[:TARGET]]... [--notify] [--replace ID] [--json]
+                 [--share ROLE:TYPE[:TARGET]]... [--share-new-folder] [--notify] [--replace ID] [--json]
 ```
 
-`upload` は既定で URL だけを標準出力に出すので、スクリプトから拾いやすい。`--share` は繰り返し指定できる（例: `--share reader:domain:example.com --share writer:user:alice@example.com`）。共有に1件でも失敗すると、URL は出したうえで終了コード 3 を返す。
+`upload` は既定で URL だけを標準出力に出すので、スクリプトから拾いやすい。`--share` は繰り返し指定できる（例: `--share reader:domain:example.com --share writer:user:alice@example.com`）。共有に1件でも失敗すると（`--share-new-folder` によるフォルダの共有を含む）、URL は出したうえで終了コード 3 を返す。`--share-new-folder` を付けたのにフォルダが既存だった場合は、共有しなかったことを標準エラーに出す（終了コードは 0）。
 
 ## 設定
 
@@ -113,13 +116,14 @@ drivelift upload <file> [--folder ID] [--folder-path A/B] [--name N] [--convert 
 - **Google Workspace なら同意画面は「内部」にする。** 組織外のアカウントは認可できないので、JSON が外に漏れても組織外からは使えない。Google はデスクトップ種別の client_secret を秘密情報として扱わないが、配布はパスワード管理ツールや DM に留め、リポジトリには置かない
 - **ファイルは各自のマイドライブに作られる。** 共有したい相手には `share` で権限を付ける（例: 同じ組織の全員に閲覧権限なら `{"role": "reader", "type": "domain", "target": "example.com"}`）
 - **チームの共有フォルダ（共有ドライブを含む）に置ける。** フォルダの ID を `folder_id` に渡せば、各自の drivelift がそこへ直接作る。ただし `folder_path` のサブフォルダはメンバーごとに別々に作られる（Aさんの drivelift が作ったフォルダは、Bさんの drivelift からは見えないため）。全員で同じ場所に集めたいときは、サブフォルダを手で作ってその ID を配り、`folder_id` で指定する
+- **新しく作ったフォルダの URL を渡すなら `share_new_folder` を付ける。** 付けないと、共有されるのはファイルだけで、フォルダは作った本人しか開けない
 - **クライアントを作り直すと全員が `invalid_client` になる。** 新しい JSON を配り直せば、取り込み時に古いトークンを破棄して再ログインに進む
 - **プロジェクトの Owner を2人以上にしておく。** 代表者の異動や退職でクライアントを管理できなくなるのを防ぐ
 - **Drive API の上限はプロジェクト単位で全員が共有する。** 通常の利用で問題になる量ではない
 
 ## 制約と注意
 
-- **`upload` を常時許可すると、共有も常時許可したことになる。** `share` を使えば、1回の呼び出しで任意の外部アドレスやドメインに権限を付けられる（0.2.0 から）。ホストのツール許可で upload を「常に許可」にしている場合、プロンプトインジェクションでファイルを外部に共有される余地がある。0.1.0 で常に許可した人も、`drivelift@0` を指定していれば自動で新しい版（0.2.0 以降。0.3.0 からは差し替え `replace_id` も）に上がる。`upload` は MCP の注釈で破壊的操作（`destructiveHint: true`）と宣言している。気になる場合は upload を毎回確認する設定にする
+- **`upload` を常時許可すると、共有も常時許可したことになる。** `share` を使えば、1回の呼び出しで任意の外部アドレスやドメインに権限を付けられる（0.2.0 から）。ホストのツール許可で upload を「常に許可」にしている場合、プロンプトインジェクションでファイルを外部に共有される余地がある。0.1.0 で常に許可した人も、`drivelift@0` を指定していれば自動で新しい版（0.2.0 以降。0.3.0 からは差し替え `replace_id`、0.4.0 からはフォルダ共有 `share_new_folder` も）に上がる。`upload` は MCP の注釈で破壊的操作（`destructiveHint: true`）と宣言している。気になる場合は upload を毎回確認する設定にする。`share_new_folder` も同じ扱いで、新しく作ったフォルダに限られるが、共有は以後そのフォルダに置くファイルにも及ぶ
 
 - `folder_id` には、ログインしたアカウントが編集できるフォルダなら何でも指定できる。drivelift が作っていないフォルダや共有ドライブ内のフォルダでもよい（2026-09-25 に共有ドライブで確認）。ただし drive.file の権限では、そのフォルダの中身は見えない。そのため `folder_path` で再利用できるのは drivelift が作ったフォルダだけで、他の人や手で作った同名フォルダがあっても、別に同名のフォルダを作る
 - 同名ファイルがあっても上書きせず、新しいファイルを作る（Drive の既定どおり）。上書きは `replace_id` で ID を明示したときだけ

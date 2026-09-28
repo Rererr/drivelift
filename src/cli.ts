@@ -9,7 +9,7 @@
  *   drivelift import-secret [path]  client_secret JSON を取り込む(省略時は ~/Downloads の候補を列挙)
  *   drivelift setup-gcloud [--project ID] [--yes]  gcloud で手順 1-2 を実行(--yes なしは計画表示)
  *   drivelift upload <file> [--folder ID] [--folder-path A/B] [--name N] [--convert MODE]
- *                    [--share ROLE:TYPE[:TARGET]]... [--notify] [--replace ID] [--json]
+ *                    [--share ROLE:TYPE[:TARGET]]... [--share-new-folder] [--notify] [--replace ID] [--json]
  *
  * 終了コード: 0 成功 / 1 実行時エラー / 2 使い方の誤り・未導入(doctor) / 3 アップロードは成功したが共有の一部が失敗
  *                                アップロードして URL を出力(--json で全項目)
@@ -41,6 +41,8 @@ Usage:
       --name <name>    name in Drive
       --share <role:type[:target]>  grant access; repeatable. e.g. reader:domain:example.com,
                        writer:user:alice@example.com, reader:anyone (public link)
+      --share-new-folder  also apply --share to the --folder-path folder if this upload
+                       created it (reused folders are never shared)
       --notify         email user/group shares
       --replace <id>   replace the contents of an earlier upload (same URL) instead of
                        creating a new file; refused if trashed, renamed or a different kind
@@ -73,6 +75,7 @@ function parseUploadArgsRaw(args: string[]) {
       folder: { type: "string" },
       "folder-path": { type: "string" },
       share: { type: "string", multiple: true },
+      "share-new-folder": { type: "boolean", default: false },
       notify: { type: "boolean", default: false },
       replace: { type: "string" },
       name: { type: "string" },
@@ -190,6 +193,7 @@ export async function main(argv: string[]): Promise<number> {
           path: file,
           ...(values["folder-path"] === undefined ? {} : { folder_path: values["folder-path"] }),
           ...(share.length > 0 ? { share } : {}),
+          ...(values["share-new-folder"] ? { share_new_folder: true } : {}),
           ...(values.notify ? { notify: true } : {}),
           ...(values.replace === undefined ? {} : { replace_id: values.replace }),
           ...(values.name === undefined ? {} : { name: values.name }),
@@ -199,7 +203,11 @@ export async function main(argv: string[]): Promise<number> {
         process.stdout.write(values.json ? `${JSON.stringify(result, null, 2)}\n` : `${result.url}\n`);
         const failedShares = result.shared.filter((s) => !s.ok);
         for (const s of failedShares) process.stderr.write(`share failed: ${s.role}:${s.type}${s.target ? `:${s.target}` : ""} (${s.error ?? "unknown"})\n`);
-        return failedShares.length > 0 ? 3 : 0;
+        const failedFolderShares = result.folder_shared.filter((s) => !s.ok);
+        for (const s of failedFolderShares) process.stderr.write(`folder share failed: ${s.role}:${s.type}${s.target ? `:${s.target}` : ""} (${s.error ?? "unknown"})\n`);
+        // 意図した挙動だが、フォルダの URL を渡しても相手は開けないので知らせる
+        if (values["share-new-folder"] && result.folder_shared.length === 0) process.stderr.write("folder not shared: the --folder-path folder already existed, and drivelift never shares a reused folder (share it in Drive if needed)\n");
+        return failedShares.length + failedFolderShares.length > 0 ? 3 : 0;
       }
       default:
         process.stderr.write(`unknown command: ${command}\n\n${USAGE}`);

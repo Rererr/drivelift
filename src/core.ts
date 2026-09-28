@@ -269,6 +269,8 @@ export interface UploadInput {
   notify?: boolean;
   /** 新規作成せず、このファイル(drivelift が作ったもの)の中身を差し替える。URL・共有は保たれる。 */
   replace_id?: string;
+  /** folder_path の末端フォルダを今回作ったなら、share と同じ共有をそのフォルダにも付ける。 */
+  share_new_folder?: boolean;
 }
 
 export interface ShareOutcome {
@@ -289,6 +291,8 @@ export interface UploadResult {
   folder_id: string | null;
   folders_created: string[];
   shared: ShareOutcome[];
+  /** folder_id(末端フォルダ)への共有の成否。share_new_folder 指定かつ末端を今回作ったときだけ入る。 */
+  folder_shared: ShareOutcome[];
   /** replace_id で既存ファイルを差し替えたなら true。 */
   replaced: boolean;
 }
@@ -310,6 +314,10 @@ export async function handleUpload(deps: Deps, input: UploadInput): Promise<Uplo
     // 差し替えはファイルの場所を変えない。置き先の指定と組み合わせると、どちらが効いたか利用者が判断できない
     if (input.folder_id !== undefined || input.folder_path !== undefined) throw new DriveliftInputError("replace_id cannot be combined with folder_id or folder_path: a replaced file stays where it is.");
   }
+  if (input.share_new_folder) {
+    if (input.folder_path === undefined) throw new DriveliftInputError("share_new_folder needs folder_path: only a folder drivelift creates in this upload is shared.");
+    if ((input.share?.length ?? 0) === 0) throw new DriveliftInputError("share_new_folder needs share: the folder gets the same permissions as the file.");
+  }
 
   const creds = requireCreds(deps);
   const access = await getAccessToken(creds, deps.configDir, deps.fetchImpl, deps.now);
@@ -319,12 +327,14 @@ export async function handleUpload(deps: Deps, input: UploadInput): Promise<Uplo
   const targetMime = resolveTargetMime(ext, convert);
   const name = input.name ?? defaultDriveName(filePath, targetMime !== null);
   let foldersCreated: string[] = [];
+  let leafCreated = false;
   try {
     if (input.replace_id !== undefined) await checkReplaceTarget(access.accessToken, input.replace_id, name, targetMime ?? sourceMimeFor(ext), deps.fetchImpl);
     let folderId = input.folder_id;
     if (input.folder_path) {
       const folder = await ensureFolderPath(access.accessToken, input.folder_path, input.folder_id, deps.fetchImpl, (name) => foldersCreated.push(name));
       folderId = folder.id;
+      leafCreated = folder.leafCreated;
     }
     const file = await uploadToDrive({
       accessToken: access.accessToken,
@@ -337,7 +347,6 @@ export async function handleUpload(deps: Deps, input: UploadInput): Promise<Uplo
       fetchImpl: deps.fetchImpl,
     });
     // 共有はファイルができた後なので、1件の失敗で全体を失敗にしない(ファイルは残る)。件ごとの成否を返す
-    const shared: ShareOutcome[] = [];
     // 大きいファイルの送信中に access_token が切れていることがあるので、共有の前に取り直す(期限内ならキャッシュが返る)
     // 取り直しに失敗しても、ファイルはもうできているので呼び出し全体は失敗にしない(再試行で二重アップロードになる)。各共有の失敗として返す
     let shareToken: string | null = access.accessToken;
@@ -351,18 +360,27 @@ export async function handleUpload(deps: Deps, input: UploadInput): Promise<Uplo
         tokenError = `could not refresh the access token before sharing: ${error instanceof Error ? error.message : String(error)}`;
       }
     }
-    for (const spec of input.share ?? []) {
-      if (!shareToken) {
-        shared.push({ role: spec.role, type: spec.type, target: spec.target ?? null, ok: false, error: tokenError ?? "no access token" });
-        continue;
+    const shareTo = async (targetId: string): Promise<ShareOutcome[]> => {
+      const outcomes: ShareOutcome[] = [];
+      for (const spec of input.share ?? []) {
+        const base = { role: spec.role, type: spec.type, target: spec.target ?? null };
+        if (!shareToken) {
+          outcomes.push({ ...base, ok: false, error: tokenError ?? "no access token" });
+          continue;
+        }
+        try {
+          await createPermission(shareToken, targetId, spec, input.notify ?? false, deps.fetchImpl);
+          outcomes.push({ ...base, ok: true });
+        } catch (error) {
+          outcomes.push({ ...base, ok: false, error: error instanceof DriveRequestError && error.failure.kind !== "other" && error.failure.kind !== "api_disabled" ? `${error.failure.kind}: ${error.failure.message}` : error instanceof Error ? error.message : String(error) });
+        }
       }
-      try {
-        await createPermission(shareToken, file.id, spec, input.notify ?? false, deps.fetchImpl);
-        shared.push({ role: spec.role, type: spec.type, target: spec.target ?? null, ok: true });
-      } catch (error) {
-        shared.push({ role: spec.role, type: spec.type, target: spec.target ?? null, ok: false, error: error instanceof DriveRequestError && error.failure.kind !== "other" && error.failure.kind !== "api_disabled" ? `${error.failure.kind}: ${error.failure.message}` : error instanceof Error ? error.message : String(error) });
-      }
-    }
+      return outcomes;
+    };
+    const shared = await shareTo(file.id);
+    // 末端を今回作ったときだけ。再利用したフォルダには以前のファイルが入りうるので、共有すると継承でそれらまで見えてしまう
+    // 途中を作っても、別プロセスが同時に末端を作っていれば末端は再利用になるので、末端そのものの作成で判定する
+    const folderShared = input.share_new_folder && folderId && leafCreated ? await shareTo(folderId) : [];
     return {
       id: file.id,
       name: file.name,
@@ -373,6 +391,7 @@ export async function handleUpload(deps: Deps, input: UploadInput): Promise<Uplo
       folder_id: folderId ?? null,
       folders_created: foldersCreated,
       shared,
+      folder_shared: folderShared,
       replaced: input.replace_id !== undefined,
     };
   } catch (error) {

@@ -73,12 +73,15 @@ From then on, just call `upload`. Calling `upload` while something is missing re
 | `folder_path` | A folder path such as `Reports/2026-09`, found or created under `folder_id` (or My Drive root). Only folders drivelift created are reused |
 | `convert` | `auto` (default) / `none` / `spreadsheet` / `document` / `presentation` |
 | `share` | Permissions to add to the uploaded file. Each item has `role` (`reader` / `commenter` / `writer`), `type` (`user` / `group` / `domain` / `anyone`) and `target` (email for user/group, domain name for domain, none for anyone) |
+| `share_new_folder` | Also add the `share` permissions to the `folder_path` leaf folder, only if this upload created it. Reused folders and the `folder_id` folder are never shared. Requires `share` and `folder_path` |
 | `notify` | Send Google's notification email for user/group shares. Default: no |
 | `replace_id` | Instead of creating a new file, replace the contents of an earlier drivelift upload (by ID). URL and sharing stay the same. Cannot be combined with `folder_id` / `folder_path` |
 
 `replace_id` is for re-publishing a revised report. The whole content is replaced, so edits and comments made directly in Sheets are lost (earlier versions stay in Drive's version history), and tab IDs change, so links to a specific tab (`#gid=`) break. To avoid replacing the wrong file, drivelift refuses without sending anything when the target is in the trash, has a different name than this upload would get, or is a different kind (e.g. a Doc for a spreadsheet upload). Under drive.file, files drivelift did not create cannot be replaced.
 
 Sharing is meant to be set only when the user asks for it, and the tool description says so. `anyone` means anyone with the link, i.e. public; use it only when the user explicitly asks. A failed share does not undo the upload; each share's result comes back in `shared`.
+
+`share_new_folder` is for handing a per-PR or per-date folder to your team by URL. Results for the folder come back in `folder_shared` (empty when nothing was shared). Only the leaf folder (`folder_id` in the result) is shared, not intermediate folders created on the way. Folder sharing is inherited, so **anything put in that folder later is visible to the same recipients**. Reused folders are never shared, because that would expose files already in them. As a result, folders created before this option existed, or whose share failed when they were created, stay unshared on later uploads; share them in Drive by hand if needed.
 
 `auto` targets: xlsx, xlsm, xls, ods, csv, tsv → Sheets; docx, doc, odt, rtf, txt, md, html, htm → Docs; pptx, ppt, odp → Slides. Anything else is stored as-is. Conversion is Drive's own import; verified on a real account for xlsx and csv (Sheets) and md (Docs with headings and tables interpreted); the rest follows Drive's supported import formats.
 
@@ -91,10 +94,10 @@ drivelift login                 sign in (waits for completion)
 drivelift import-secret [path]  import the client JSON
 drivelift setup-gcloud [--project ID] [--yes]  steps 1-2 via gcloud (plan only without --yes)
 drivelift upload <file> [--folder ID] [--folder-path A/B] [--name N] [--convert MODE]
-                 [--share ROLE:TYPE[:TARGET]]... [--notify] [--replace ID] [--json]
+                 [--share ROLE:TYPE[:TARGET]]... [--share-new-folder] [--notify] [--replace ID] [--json]
 ```
 
-`upload` prints only the URL by default, so scripts can capture it. `--share` is repeatable (e.g. `--share reader:domain:example.com --share writer:user:alice@example.com`). If any share fails, the URL is still printed and the exit code is 3.
+`upload` prints only the URL by default, so scripts can capture it. `--share` is repeatable (e.g. `--share reader:domain:example.com --share writer:user:alice@example.com`). If any share fails (including a folder share from `--share-new-folder`), the URL is still printed and the exit code is 3. If `--share-new-folder` finds the folder already existed, a note that it was not shared goes to stderr (exit code 0).
 
 ## Configuration
 
@@ -113,13 +116,14 @@ One person can create the OAuth client and hand the downloaded JSON to the team.
 - **On Google Workspace, make the consent screen Internal.** Accounts outside the organization cannot authorize, so a leaked JSON is useless outside it. Google does not treat a Desktop client secret as confidential, but still hand it out through a password manager or DM, not a repository
 - **Files land in each member's My Drive.** Grant access with `share` (e.g. read access for everyone in the organization: `{"role": "reader", "type": "domain", "target": "example.com"}`)
 - **A team shared folder (including a shared drive) works.** Pass its ID as `folder_id` and each member's drivelift writes straight into it. Subfolders from `folder_path`, however, are created per member (A's drivelift-made folder is invisible to B's drivelift). To gather everything in one place, create the subfolders by hand and hand out their IDs for `folder_id`
+- **To hand out the URL of a folder drivelift created, add `share_new_folder`.** Without it only the file is shared, and only its creator can open the folder
 - **Recreating the client makes everyone hit `invalid_client`.** Hand out the new JSON; importing it discards the old token and leads to a fresh sign-in
 - **Give the project at least two Owners**, so the client stays manageable when the representative leaves
 - **Drive API quota is per project and shared by everyone.** Normal use does not come close
 
 ## Limitations
 
-- **Always-allowing `upload` also always-allows sharing.** With `share`, one call can grant access to any outside address or domain (since 0.2.0). If your host is set to always allow upload, a prompt injection could share files externally. Users who always-allowed it on 0.1.0 get newer versions automatically via `drivelift@0` (0.2.0 and later; since 0.3.0 that includes `replace_id`). `upload` is annotated as destructive (`destructiveHint: true`). If that worries you, set upload to ask every time
+- **Always-allowing `upload` also always-allows sharing.** With `share`, one call can grant access to any outside address or domain (since 0.2.0). If your host is set to always allow upload, a prompt injection could share files externally. Users who always-allowed it on 0.1.0 get newer versions automatically via `drivelift@0` (0.2.0 and later; since 0.3.0 that includes `replace_id`, since 0.4.0 `share_new_folder`). `upload` is annotated as destructive (`destructiveHint: true`). If that worries you, set upload to ask every time. The same applies to `share_new_folder`: it only touches folders it just created, but the share extends to whatever is put in that folder later
 
 - `folder_id` accepts any folder the signed-in account can edit, including folders drivelift did not create and folders in shared drives (confirmed on a shared drive, 2026-09-25). With `drive.file`, drivelift cannot see those folders' contents, so `folder_path` only reuses folders drivelift created; it makes its own folder even if a same-named one made by someone else exists
 - Existing files with the same name are not overwritten; a new file is created (Drive's default). Overwriting happens only with an explicit `replace_id`

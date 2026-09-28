@@ -218,11 +218,12 @@ async function findOrCreateFolder(accessToken: string, name: string, parent: str
 /**
  * onCreated は作成のたびに呼ぶ。途中の階層で失敗しても、それまでに作ったフォルダを呼び出し側が報告できるようにするため。
  */
-export async function ensureFolderPath(accessToken: string, folderPath: string, parentId: string | undefined, fetchImpl: FetchLike, onCreated: (name: string) => void = () => undefined): Promise<{ id: string; created: string[] }> {
+export async function ensureFolderPath(accessToken: string, folderPath: string, parentId: string | undefined, fetchImpl: FetchLike, onCreated: (name: string) => void = () => undefined): Promise<{ id: string; created: string[]; leafCreated: boolean }> {
   const parts = splitFolderPath(folderPath);
   if (parts.length === 0) throw new DriveliftInputError("folder_path is empty.");
   let parent = parentId ?? "root";
   const created: string[] = [];
+  let leafCreated = false;
   for (const name of parts) {
     const key = `${parent}\u0000${name}`;
     let step = inflightFolders.get(key);
@@ -233,13 +234,14 @@ export async function ensureFolderPath(accessToken: string, folderPath: string, 
       inflightFolders.set(key, step);
     }
     const r = await step;
-    if (r.created && originator) {
+    leafCreated = r.created && originator;
+    if (leafCreated) {
       created.push(name);
       onCreated(name);
     }
     parent = r.id;
   }
-  return { id: parent, created };
+  return { id: parent, created, leafCreated };
 }
 
 // ---- permissions ----------------------------------------------------------

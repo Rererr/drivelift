@@ -117,7 +117,7 @@ describe("ensureFolderPath", () => {
       return new Response(JSON.stringify({ files: q.includes("name='Reports'") ? [{ id: "existing-reports" }] : [] }));
     };
     const r = await ensureFolderPath("t", "/Reports//Bob's 2026/", undefined, fetchImpl);
-    expect(r).toEqual({ id: "new-Bob's 2026", created: ["Bob's 2026"] });
+    expect(r).toEqual({ id: "new-Bob's 2026", created: ["Bob's 2026"], leafCreated: true });
     expect(queries[0]).toContain("'root' in parents");
     expect(queries[1]).toContain("name='Bob\\'s 2026'");
     expect(queries[1]).toContain("'existing-reports' in parents");
@@ -196,7 +196,7 @@ describe("ensureFolderPath の並行呼び出し", () => {
         ? new Response(JSON.stringify({ files: [], nextPageToken: "p2" }))
         : new Response(JSON.stringify({ files: [{ id: "new", createdTime: "2026-02-01T00:00:00Z" }, { id: "old", createdTime: "2026-01-01T00:00:00Z" }] }));
     };
-    await expect(ensureFolderPath("t", "A", undefined, paged)).resolves.toEqual({ id: "old", created: [] });
+    await expect(ensureFolderPath("t", "A", undefined, paged)).resolves.toEqual({ id: "old", created: [], leafCreated: false });
 
     let posted = false;
     const incomplete: FetchLike = async (_i, init) => {

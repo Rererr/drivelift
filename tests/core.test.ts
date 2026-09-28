@@ -140,7 +140,7 @@ describe("handleUpload", () => {
     });
     const result = await handleUpload(deps, { path: file, folder_id: "F" });
     expect(metadata).toEqual({ name: "report", mimeType: "application/vnd.google-apps.spreadsheet", parents: ["F"] });
-    expect(result).toEqual({ id: "f1", name: "report", mimeType: "application/vnd.google-apps.spreadsheet", url: "https://docs.google.com/spreadsheets/d/f1/edit", converted_to: "application/vnd.google-apps.spreadsheet", account: "me@example.com", folder_id: "F", folders_created: [], shared: [], replaced: false });
+    expect(result).toEqual({ id: "f1", name: "report", mimeType: "application/vnd.google-apps.spreadsheet", url: "https://docs.google.com/spreadsheets/d/f1/edit", converted_to: "application/vnd.google-apps.spreadsheet", account: "me@example.com", folder_id: "F", folders_created: [], shared: [], folder_shared: [], replaced: false });
   });
 
   it("folder_id 指定で 404 なら ID と編集権限の確認を案内する", async () => {
@@ -182,6 +182,92 @@ describe("handleUpload", () => {
       { role: "reader", type: "domain", target: "example.com", ok: true },
       expect.objectContaining({ role: "writer", type: "user", target: "x@example.com", ok: false }),
     ]);
+  });
+
+  describe("share_new_folder", () => {
+    const spec = [{ role: "reader" as const, type: "domain" as const, target: "example.com" }];
+    /** existing: 検索で既存として返すフォルダ名。途中と末端で既存・新規を分けるため名前で指定する */
+    function folderDeps(existing: string[], folderPermission: (fileId: string) => Response = () => new Response(JSON.stringify({ id: "p" }))) {
+      const permitted: string[] = [];
+      let created = 0;
+      const deps = makeDeps(dir, ENV_CREDS, (url) => {
+        if (url.includes("/drive/v3/files?q=")) {
+          const q = new URL(url).searchParams.get("q") ?? "";
+          const hit = existing.find((name) => q.includes(`name='${name}'`));
+          return new Response(JSON.stringify({ files: hit ? [{ id: `old-${hit}`, createdTime: "2026-01-01T00:00:00Z" }] : [] }));
+        }
+        if (url.includes("/drive/v3/files?fields=id")) return new Response(JSON.stringify({ id: `new-${created++}` }));
+        if (url.includes("/upload/drive/v3/files")) return new Response(null, { headers: { Location: "https://upload.test/s" } });
+        if (url === "https://upload.test/s") return new Response(JSON.stringify({ id: "f1" }));
+        const m = /\/files\/([^/]+)\/permissions/.exec(url);
+        if (m?.[1]) {
+          permitted.push(m[1]);
+          return m[1] === "f1" ? new Response(JSON.stringify({ id: "p" })) : folderPermission(m[1]);
+        }
+        return undefined;
+      });
+      return { deps, permitted };
+    }
+
+    beforeEach(() => {
+      saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+      writeFileSync(join(dir, "r.csv"), "a,b");
+    });
+
+    it("末端フォルダを今回作ったら、ファイルと同じ共有を末端フォルダにだけ付ける(途中の新規フォルダには付けない)", async () => {
+      const { deps, permitted } = folderDeps([]);
+      const r = await handleUpload(deps, { path: join(dir, "r.csv"), folder_path: "repo/#1", share: spec, share_new_folder: true });
+      expect(r.folders_created).toEqual(["repo", "#1"]);
+      expect(r.folder_id).toBe("new-1");
+      expect(permitted).toEqual(["f1", "new-1"]);
+      expect(r.folder_shared).toEqual([{ role: "reader", type: "domain", target: "example.com", ok: true }]);
+    });
+
+    it("途中が既存でも、末端を今回作ったら末端に付ける", async () => {
+      const { deps, permitted } = folderDeps(["repo"]);
+      const r = await handleUpload(deps, { path: join(dir, "r.csv"), folder_path: "repo/#1", share: spec, share_new_folder: true });
+      expect(r.folder_id).toBe("new-0");
+      expect(permitted).toEqual(["f1", "new-0"]);
+    });
+
+    it("途中を作っても、末端が既存(別プロセスが先に作った等)なら付けない", async () => {
+      const { deps, permitted } = folderDeps(["#1"]);
+      const r = await handleUpload(deps, { path: join(dir, "r.csv"), folder_path: "repo/#1", share: spec, share_new_folder: true });
+      expect(r.folders_created).toEqual(["repo"]);
+      expect(permitted).toEqual(["f1"]);
+      expect(r.folder_shared).toEqual([]);
+    });
+
+    it("再利用したフォルダには付けない", async () => {
+      const { deps, permitted } = folderDeps(["repo#1"]);
+      const r = await handleUpload(deps, { path: join(dir, "r.csv"), folder_path: "repo#1", share: spec, share_new_folder: true });
+      expect(r.folders_created).toEqual([]);
+      expect(permitted).toEqual(["f1"]);
+      expect(r.folder_shared).toEqual([]);
+    });
+
+    it("指定しなければ、新規フォルダでも付けない", async () => {
+      const { deps, permitted } = folderDeps([]);
+      const r = await handleUpload(deps, { path: join(dir, "r.csv"), folder_path: "repo#1", share: spec });
+      expect(permitted).toEqual(["f1"]);
+      expect(r.folder_shared).toEqual([]);
+    });
+
+    it("フォルダの共有に失敗しても、アップロードとファイルの共有は成功として返す", async () => {
+      const { deps } = folderDeps([], () => new Response(JSON.stringify({ error: { message: "Bad Request" } }), { status: 400 }));
+      const r = await handleUpload(deps, { path: join(dir, "r.csv"), folder_path: "repo#1", share: spec, share_new_folder: true });
+      expect(r.id).toBe("f1");
+      expect(r.shared).toEqual([expect.objectContaining({ ok: true })]);
+      expect(r.folder_shared).toEqual([expect.objectContaining({ ok: false, error: expect.stringMatching(/Bad Request/) })]);
+    });
+
+    it("share か folder_path が無ければ何も呼ばずに弾く", async () => {
+      const { deps } = folderDeps([]);
+      await expect(handleUpload(deps, { path: join(dir, "r.csv"), share: spec, share_new_folder: true })).rejects.toThrow(/needs folder_path/);
+      await expect(handleUpload(deps, { path: join(dir, "r.csv"), folder_path: "repo#1", share_new_folder: true })).rejects.toThrow(/needs share/);
+      await expect(handleUpload(deps, { path: join(dir, "r.csv"), folder_path: "repo#1", share: [], share_new_folder: true })).rejects.toThrow(/needs share/);
+      expect(deps.calls).toHaveLength(0);
+    });
   });
 
   describe("replace_id", () => {
