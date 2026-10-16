@@ -1,12 +1,11 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { clientSecretPath, saveToken } from "../src/config.js";
-import { handleAuthStart, handleAuthStatus, handleImportClientSecret, handleStatus, handleUpload, resolveUserPath, type Deps } from "../src/core.js";
-import { homedir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { accountDir, clientSecretPath, loadToken, parseClientSecret, saveAccount, saveSources, type StoredToken } from "../src/config.js";
+import { handleAuthStart, handleAuthStatus, handleImportClientSecret, handleMapSource, handleStatus, handleUpload, resolveUserPath, type Deps } from "../src/core.js";
+import { homedir, tmpdir as osTmpdir } from "node:os";
 import type { FetchLike } from "../src/drive.js";
-import { DriveliftError } from "../src/errors.js";
+import { AccountUnresolvedError, DriveliftError } from "../src/errors.js";
 
 const NOW = 1_700_000_000_000;
 const ENV_CREDS = { DRIVELIFT_CLIENT_ID: "cid", DRIVELIFT_CLIENT_SECRET: "csec" };
@@ -36,6 +35,8 @@ function makeDeps(dir: string, env: NodeJS.ProcessEnv, route: Route): Deps & { c
     downloadsDir: join(dir, "Downloads"),
     hasGcloud: () => false,
     execGcloud: async () => ({ code: 1, stdout: "", stderr: "not in tests" }),
+    cwd: dir,
+    gitOriginUrl: () => null,
     calls,
     opened,
   };
@@ -48,9 +49,14 @@ const disabledAbout: Route = (url) =>
     : undefined;
 const invalidGrant: Route = (url) => (url.includes("/token") ? new Response(JSON.stringify({ error: "invalid_grant", error_description: "expired" }), { status: 400 }) : undefined);
 
+/** env のクライアントでログイン済みの枠を作る。 */
+function signIn(configDir: string, token: StoredToken, email = "me@example.com"): void {
+  saveAccount(configDir, email, token, { clientId: "cid", clientSecret: "csec", source: "env" });
+}
+
 let dir: string;
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "drivelift-core-"));
+  dir = realpathSync.native(mkdtempSync(join(osTmpdir(), "drivelift-core-")));
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -86,7 +92,7 @@ describe("handleStatus は導入状態を5段階で返す", () => {
   });
 
   it("token_invalid: refresh が invalid_grant", async () => {
-    saveToken(dir, { refresh_token: "ref" });
+    signIn(dir, { refresh_token: "ref" });
     const status = await handleStatus(makeDeps(dir, ENV_CREDS, invalidGrant));
     expect(status.state).toBe("token_invalid");
     expect(status.message).toContain("invalid_grant");
@@ -94,14 +100,14 @@ describe("handleStatus は導入状態を5段階で返す", () => {
   });
 
   it("api_disabled: about.get が accessNotConfigured", async () => {
-    saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+    signIn(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
     const status = await handleStatus(makeDeps(dir, ENV_CREDS, disabledAbout));
     expect(status.state).toBe("api_disabled");
     expect(status.urls["enable_drive_api"]).toBe("https://console.developers.google.com/apis/api/drive.googleapis.com/overview?project=1");
   });
 
   it("ready: about.get が通ればアカウント付き", async () => {
-    saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+    signIn(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
     const deps = makeDeps(dir, ENV_CREDS, okAbout);
     const status = await handleStatus(deps);
     expect(status).toMatchObject({ state: "ready", ready: true, account: "me@example.com", client_source: "env" });
@@ -126,7 +132,7 @@ describe("handleUpload", () => {
   });
 
   it("成功時は URL と変換先を返し、名前は拡張子を落とす", async () => {
-    saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000, account: "me@example.com" });
+    signIn(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000, account: "me@example.com" });
     const file = join(dir, "report.xlsx");
     writeFileSync(file, "x");
     let metadata: Record<string, unknown> | undefined;
@@ -140,11 +146,11 @@ describe("handleUpload", () => {
     });
     const result = await handleUpload(deps, { path: file, folder_id: "F" });
     expect(metadata).toEqual({ name: "report", mimeType: "application/vnd.google-apps.spreadsheet", parents: ["F"] });
-    expect(result).toEqual({ id: "f1", name: "report", mimeType: "application/vnd.google-apps.spreadsheet", url: "https://docs.google.com/spreadsheets/d/f1/edit", converted_to: "application/vnd.google-apps.spreadsheet", account: "me@example.com", folder_id: "F", folders_created: [], shared: [], folder_shared: [], replaced: false });
+    expect(result).toEqual({ id: "f1", name: "report", mimeType: "application/vnd.google-apps.spreadsheet", url: "https://docs.google.com/spreadsheets/d/f1/edit", converted_to: "application/vnd.google-apps.spreadsheet", account: "me@example.com", source: null, folder_id: "F", folders_created: [], shared: [], folder_shared: [], replaced: false });
   });
 
   it("folder_id 指定で 404 なら ID と編集権限の確認を案内する", async () => {
-    saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+    signIn(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
     const file = join(dir, "a.md");
     writeFileSync(file, "# x");
     let n = 0;
@@ -156,7 +162,7 @@ describe("handleUpload", () => {
   });
 
   it("folder_path でフォルダを用意してから置き、共有は1件ずつ成否を返す(失敗してもアップロードは成功扱い)", async () => {
-    saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+    signIn(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
     const file = join(dir, "r.csv");
     writeFileSync(file, "a,b");
     let metadata: Record<string, unknown> | undefined;
@@ -210,7 +216,7 @@ describe("handleUpload", () => {
     }
 
     beforeEach(() => {
-      saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+      signIn(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
       writeFileSync(join(dir, "r.csv"), "a,b");
     });
 
@@ -289,7 +295,7 @@ describe("handleUpload", () => {
     }
     let file: string;
     beforeEach(() => {
-      saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+      signIn(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
       file = join(dir, "report.xlsx");
       writeFileSync(file, "x");
     });
@@ -349,7 +355,7 @@ describe("handleUpload", () => {
   });
 
   it("空の folder_id / folder_path と 21 件以上の share は何も呼ばずに弾く", async () => {
-    saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+    signIn(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
     const file = join(dir, "r.csv");
     writeFileSync(file, "a,b");
     const deps = makeDeps(dir, ENV_CREDS, () => undefined);
@@ -361,7 +367,7 @@ describe("handleUpload", () => {
   });
 
   it("共有前のトークン取り直しが失敗しても、アップロード結果は返し共有だけ失敗にする", async () => {
-    saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+    signIn(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
     const file = join(dir, "r.csv");
     writeFileSync(file, "a,b");
     let now = NOW;
@@ -381,7 +387,7 @@ describe("handleUpload", () => {
   });
 
   it("パスの途中で失敗しても、それまでに作ったフォルダをエラーに含める", async () => {
-    saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+    signIn(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
     const file = join(dir, "r.csv");
     writeFileSync(file, "a,b");
     let posts = 0;
@@ -397,7 +403,7 @@ describe("handleUpload", () => {
   });
 
   it("タイムアウトなど DriveliftError 以外の失敗でも、作ったフォルダを伝える", async () => {
-    saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+    signIn(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
     const file = join(dir, "r.csv");
     writeFileSync(file, "a,b");
     const deps = makeDeps(dir, ENV_CREDS, (url) => {
@@ -410,7 +416,7 @@ describe("handleUpload", () => {
   });
 
   it("フォルダを作った後に upload が失敗したら、作ったフォルダをエラーに含める", async () => {
-    saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+    signIn(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
     const file = join(dir, "r.csv");
     writeFileSync(file, "a,b");
     const deps = makeDeps(dir, ENV_CREDS, (url) => {
@@ -423,7 +429,7 @@ describe("handleUpload", () => {
   });
 
   it("共有指定が不正なら何も作らずに失敗する", async () => {
-    saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+    signIn(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
     const file = join(dir, "r.csv");
     writeFileSync(file, "a,b");
     const deps = makeDeps(dir, ENV_CREDS, () => undefined);
@@ -432,7 +438,7 @@ describe("handleUpload", () => {
   });
 
   it("API 未有効化は api_disabled の Status に変換される", async () => {
-    saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
+    signIn(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000 });
     const file = join(dir, "a.md");
     writeFileSync(file, "# x");
     const deps = makeDeps(dir, ENV_CREDS, (url) => (url.includes("/upload/") ? new Response(JSON.stringify({ error: { message: "disabled", errors: [{ reason: "accessNotConfigured" }] } }), { status: 403 }) : undefined));
@@ -442,10 +448,10 @@ describe("handleUpload", () => {
 
 describe("resolveUserPath", () => {
   it("先頭の ~ を展開し、相対パスは cwd 基準にする", () => {
-    expect(resolveUserPath("~/Downloads/x.json")).toBe(join(homedir(), "Downloads", "x.json"));
-    expect(resolveUserPath("~")).toBe(homedir());
-    expect(resolveUserPath("/abs/x")).toBe("/abs/x");
-    expect(resolveUserPath("rel/x")).toBe(join(process.cwd(), "rel", "x"));
+    expect(resolveUserPath("~/Downloads/x.json", "/cwd")).toBe(join(homedir(), "Downloads", "x.json"));
+    expect(resolveUserPath("~", "/cwd")).toBe(homedir());
+    expect(resolveUserPath("/abs/x", "/cwd")).toBe("/abs/x");
+    expect(resolveUserPath("rel/x", "/cwd")).toBe(join("/cwd", "rel", "x"));
   });
 });
 
@@ -517,5 +523,594 @@ describe("auth_start / auth_status の2段", () => {
     const started = await handleAuthStart(deps, { open_browser: false, wait_seconds: 0 });
     expect(deps.opened).toEqual([]);
     expect(started.next).toMatch(/open the URL/);
+  });
+});
+
+describe("複数アカウント", () => {
+  const A = "a@example.com";
+  const B = "b@example.com";
+  const fresh = { access_token: "acc", expires_at: NOW + 600_000 };
+  let repo: string;
+  let file: string;
+
+  /** a は git@github.com:org/a.git の作業ツリー。トークンは枠ごとに acc-<email> */
+  beforeEach(() => {
+    repo = join(dir, "work", "a");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    file = join(repo, "r.csv");
+    writeFileSync(file, "a,b");
+    signIn(dir, { refresh_token: "ref-a", ...fresh, access_token: `acc-${A}` }, A);
+    signIn(dir, { refresh_token: "ref-b", ...fresh, access_token: `acc-${B}` }, B);
+  });
+
+  function uploadDeps(env: NodeJS.ProcessEnv = ENV_CREDS) {
+    const bearers: string[] = [];
+    const deps = makeDeps(dir, env, (url, init) => {
+      if (url.includes("/upload/drive/v3/files")) {
+        bearers.push(String((init?.headers as Record<string, string>)["Authorization"]));
+        return new Response(null, { headers: { Location: "https://upload.test/s" } });
+      }
+      if (url === "https://upload.test/s") return new Response(JSON.stringify({ id: "f1", webViewLink: "https://drive.test/f1" }));
+      return undefined;
+    });
+    deps.gitOriginUrl = (root) => (root === repo ? "git@github.com:org/a.git" : null);
+    return { deps, bearers };
+  }
+
+  it("枠が2つで到達元が対応づいていなければ、何も送らずに枠の一覧と到達元を返して拒否する", async () => {
+    const { deps } = uploadDeps();
+    const error = await handleUpload(deps, { path: file }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(AccountUnresolvedError);
+    expect((error as AccountUnresolvedError).toPayload()).toMatchObject({ state: "account_unresolved", candidates: [A, B], source: "github.com/org/a", next_steps: expect.arrayContaining([expect.stringMatching(/map_source/)]) });
+    expect(deps.calls).toEqual([]);
+  });
+
+  it("同じ到達元が2つの枠に対応づいていたら(手で書いた sources.json)、曖昧として拒否する", async () => {
+    saveSources(accountDir(dir, A), ["github.com/org/a"]);
+    saveSources(accountDir(dir, B), ["github.com/org/a"]);
+    const { deps } = uploadDeps();
+    await expect(handleUpload(deps, { path: file })).rejects.toThrow(/more than one account/);
+    expect(deps.calls).toEqual([]);
+  });
+
+  it("map_source で対応づけた到達元からは、その枠のトークンで送り、解決に使った鍵を返す", async () => {
+    await handleMapSource(uploadDeps().deps, { account: B, source: "github.com/org/a" });
+    const { deps, bearers } = uploadDeps();
+    const r = await handleUpload(deps, { path: file });
+    expect(bearers).toEqual([`Bearer acc-${B}`]);
+    expect(r).toMatchObject({ account: B, source: "github.com/org/a" });
+    expect(r.suggest_map).toBeUndefined();
+  });
+
+  it("account 引数で送ると、到達元が未登録なら suggest_map を返すが対応づけは書かない", async () => {
+    const { deps, bearers } = uploadDeps();
+    const r = await handleUpload(deps, { path: file, account: A });
+    expect(bearers).toEqual([`Bearer acc-${A}`]);
+    expect(r).toMatchObject({ account: A, source: null, suggest_map: { source: "github.com/org/a", account: A } });
+    expect(existsSync(join(dir, "accounts", A, "sources.json"))).toBe(false);
+  });
+
+  it("account 引数が到達元の対応づけと食い違っても送るが、mapped_to に対応づいている枠を載せる", async () => {
+    await handleMapSource(uploadDeps().deps, { account: B, source: "github.com/org/a" });
+    const { deps, bearers } = uploadDeps();
+    const r = await handleUpload(deps, { path: file, account: A });
+    expect(bearers).toEqual([`Bearer acc-${A}`]);
+    expect(r).toMatchObject({ account: A, mapped_to: B });
+    expect(r).not.toHaveProperty("suggest_map");
+    const same = await handleUpload(uploadDeps().deps, { path: file, account: B });
+    expect(same).not.toHaveProperty("mapped_to");
+    expect(same).not.toHaveProperty("suggest_map");
+  });
+
+  it("suggest_map は git remote の鍵のときだけ。パスの到達元(git でない・origin なし)では出さない", async () => {
+    const plain = join(dir, "plain");
+    mkdirSync(plain);
+    writeFileSync(join(plain, "r.csv"), "a,b");
+    const r = await handleUpload(uploadDeps().deps, { path: join(plain, "r.csv"), account: A });
+    expect(r.account).toBe(A);
+    expect(r).not.toHaveProperty("suggest_map");
+    const { deps } = uploadDeps();
+    deps.gitOriginUrl = () => null;
+    expect(await handleUpload(deps, { path: file, account: A })).not.toHaveProperty("suggest_map");
+  });
+
+  it("account 引数で送るなら git が読めなくても送り、suggest_map も mapped_to も出さない", async () => {
+    const { deps, bearers } = uploadDeps();
+    deps.gitOriginUrl = () => {
+      throw new Error("detected dubious ownership");
+    };
+    const r = await handleUpload(deps, { path: file, account: A });
+    expect(bearers).toEqual([`Bearer acc-${A}`]);
+    expect(r).not.toHaveProperty("suggest_map");
+    expect(r).not.toHaveProperty("mapped_to");
+  });
+
+  it("git が読めなければ、パスの対応づけに落とさず git の失敗を理由に拒否する", async () => {
+    saveSources(accountDir(dir, A), [join(dir, "work")]);
+    const { deps } = uploadDeps();
+    deps.gitOriginUrl = () => {
+      throw new Error("detected dubious ownership in repository");
+    };
+    const error = await handleUpload(deps, { path: file }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(AccountUnresolvedError);
+    expect((error as AccountUnresolvedError).toPayload()).toMatchObject({ state: "account_unresolved", message: expect.stringMatching(/dubious ownership/), source: null });
+    expect(deps.calls).toEqual([]);
+  });
+
+  it("パスの対応づけが重なれば最長一致で送る", async () => {
+    const plain = join(dir, "plain", "clientB");
+    mkdirSync(plain, { recursive: true });
+    writeFileSync(join(plain, "r.csv"), "a,b");
+    const { deps, bearers } = uploadDeps();
+    await handleMapSource(deps, { account: A, source: join(dir, "plain") });
+    await handleMapSource(deps, { account: B, source: plain });
+    expect(await handleUpload(deps, { path: join(plain, "r.csv") })).toMatchObject({ account: B, source: plain });
+    expect(bearers).toEqual([`Bearer acc-${B}`]);
+  });
+
+  it("DRIVELIFT_ACCOUNT で枠を選べる(suggest_map は出さない)。ログインしていないアカウントなら送らずに拒否する", async () => {
+    const { deps, bearers } = uploadDeps({ ...ENV_CREDS, DRIVELIFT_ACCOUNT: B });
+    const r = await handleUpload(deps, { path: file });
+    expect(r).toMatchObject({ account: B, source: null });
+    expect(r).not.toHaveProperty("suggest_map");
+    expect(bearers).toEqual([`Bearer acc-${B}`]);
+    const unknown = uploadDeps({ ...ENV_CREDS, DRIVELIFT_ACCOUNT: "c@example.com" });
+    await expect(handleUpload(unknown.deps, { path: file })).rejects.toBeInstanceOf(AccountUnresolvedError);
+    await expect(handleUpload(unknown.deps, { path: file, account: "c@example.com" })).rejects.toThrow(/c@example.com is not signed in/);
+    expect(unknown.deps.calls).toEqual([]);
+  });
+
+  it("枠が1つなら、対応づけが無くても黙ってその枠で送る(0.4.0 と同じ振る舞い)", async () => {
+    rmSync(join(dir, "accounts", B), { recursive: true });
+    const { deps } = uploadDeps();
+    const r = await handleUpload(deps, { path: file });
+    expect(r).toMatchObject({ account: A, source: null });
+    expect(r).not.toHaveProperty("suggest_map");
+  });
+
+  it("status は枠ごとの状態と cwd から解決される枠を返し、トップレベルの state は解決した枠の状態", async () => {
+    const route: Route = (url, init) => {
+      if (!url.includes("/drive/v3/about")) return undefined;
+      const auth = String((init?.headers as Record<string, string>)["Authorization"]);
+      return auth === `Bearer acc-${B}` ? disabledAbout(url, init) : okAbout(url, init);
+    };
+    const deps = makeDeps(dir, ENV_CREDS, route);
+    deps.gitOriginUrl = () => "git@github.com:org/a.git";
+    deps.cwd = repo;
+
+    const unresolved = await handleStatus(deps);
+    expect(unresolved).toMatchObject({ state: "account_unresolved", ready: false, resolved: { account: null, source: "github.com/org/a" } });
+    expect(unresolved.accounts).toEqual([
+      { email: A, state: "ready", sources: [], client_source: "env" },
+      { email: B, state: "api_disabled", sources: [], client_source: "env" },
+    ]);
+
+    await handleMapSource(deps, { account: B, source: "github.com/org/a" });
+    expect(await handleStatus(deps)).toMatchObject({ state: "api_disabled", resolved: { account: B, by: "source", source: "github.com/org/a" } });
+
+    // git が読めなくても status 自体は落とさず、理由を resolved.reason に入れる
+    deps.gitOriginUrl = () => {
+      throw new Error("detected dubious ownership");
+    };
+    const gitFailed = await handleStatus(deps);
+    expect(gitFailed).toMatchObject({ state: "account_unresolved", resolved: { account: null, source: null, reason: expect.stringMatching(/dubious ownership/) } });
+    expect(gitFailed.accounts).toHaveLength(2);
+  });
+
+  describe("map_source", () => {
+    it("source 省略時は path(省略時は cwd)の鍵を候補として返すだけで書かない", async () => {
+      const { deps } = uploadDeps();
+      const r = await handleMapSource(deps, { account: A, path: file });
+      expect(r).toMatchObject({ state: "candidate", account: A, source: "github.com/org/a", sources: [] });
+      deps.cwd = join(dir, "work");
+      expect(await handleMapSource(deps, { account: A })).toMatchObject({ state: "candidate", source: join(dir, "work") });
+      expect(existsSync(join(dir, "accounts", A, "sources.json"))).toBe(false);
+    });
+
+    it("追加・重複追加・削除。URL で渡しても鍵の形で保存する", async () => {
+      const { deps } = uploadDeps();
+      expect(await handleMapSource(deps, { account: A, source: "https://github.com/org/a.git" })).toMatchObject({ state: "added", source: "github.com/org/a", sources: ["github.com/org/a"] });
+      expect(await handleMapSource(deps, { account: A, source: "github.com/org/a" })).toMatchObject({ state: "unchanged", sources: ["github.com/org/a"] });
+      const x = join(dir, "x");
+      mkdirSync(x);
+      expect(await handleMapSource(deps, { account: A, source: `${x}/` })).toMatchObject({ state: "added", sources: ["github.com/org/a", x] });
+      expect(await handleMapSource(deps, { account: A, source: "github.com/org/a", remove: true })).toMatchObject({ state: "removed", sources: [x] });
+      expect(await handleMapSource(deps, { account: A, source: "github.com/org/a", remove: true })).toMatchObject({ state: "unchanged", sources: [x] });
+    });
+
+    it("別の枠に対応づいている到達元は追加せず、先に remove を求める(1回で付け替えさせない)", async () => {
+      const { deps } = uploadDeps();
+      await handleMapSource(deps, { account: A, source: "github.com/org/a" });
+      await expect(handleMapSource(deps, { account: B, source: "https://github.com/org/a.git" })).rejects.toThrow(/already mapped to a@example.com.*remove/);
+      const x = join(dir, "x");
+      mkdirSync(x);
+      await handleMapSource(deps, { account: A, source: `${x}/` });
+      await expect(handleMapSource(deps, { account: B, source: x })).rejects.toThrow(/already mapped to a@example.com/);
+      expect(existsSync(join(dir, "accounts", B, "sources.json"))).toBe(false);
+      await handleMapSource(deps, { account: A, source: "github.com/org/a", remove: true });
+      expect(await handleMapSource(deps, { account: B, source: "github.com/org/a" })).toMatchObject({ state: "added" });
+    });
+
+    it("短い・長い既存の対応づけと重なるパスを追加したら、最長一致になることを知らせる", async () => {
+      const { deps } = uploadDeps();
+      const work = join(dir, "work");
+      mkdirSync(join(work, "clientB"), { recursive: true });
+      mkdirSync(join(dir, "elsewhere"));
+      await handleMapSource(deps, { account: A, source: work });
+      expect((await handleMapSource(deps, { account: B, source: join(work, "clientB") })).message).toMatch(new RegExp(`overlaps ${work} \\(a@example.com\\).*longest`));
+      expect((await handleMapSource(deps, { account: B, source: join(dir, "elsewhere") })).message).not.toMatch(/overlaps/);
+    });
+
+    it("ルート・ホーム・一時ディレクトリとその祖先は対応づけない(外すのはできる)", async () => {
+      const { deps } = uploadDeps();
+      const systemTemp = ["/tmp", "/var/tmp", ...(process.platform === "darwin" ? ["/private/tmp", "/private/var/tmp"] : [])];
+      for (const source of ["/", homedir(), osTmpdir(), dirname(homedir()), ...systemTemp, `${homedir()}/.`, `${homedir()}/x/..`]) {
+        await expect(handleMapSource(deps, { account: A, source })).rejects.toThrow(/too broad/);
+      }
+      expect(existsSync(join(dir, "accounts", A, "sources.json"))).toBe(false);
+      saveSources(accountDir(dir, A), ["/"]);
+      expect(await handleMapSource(deps, { account: A, source: "/", remove: true })).toMatchObject({ state: "removed", sources: [] });
+    });
+
+    it("ホームを指すシンボリックリンクも、実体で判定して対応づけない", async () => {
+      const { deps } = uploadDeps();
+      const link = join(dir, "home-link");
+      symlinkSync(homedir(), link);
+      await expect(handleMapSource(deps, { account: A, source: link })).rejects.toThrow(/too broad/);
+    });
+
+    it("存在しないパスは対応づけない(実体にそろえられず照合に使えない)が、外すことはできる", async () => {
+      const { deps } = uploadDeps();
+      const gone = join(dir, "gone");
+      await expect(handleMapSource(deps, { account: A, source: gone })).rejects.toThrow(/does not exist/);
+      expect(existsSync(join(dir, "accounts", A, "sources.json"))).toBe(false);
+      saveSources(accountDir(dir, A), [gone]);
+      expect(await handleMapSource(deps, { account: A, source: `${gone}/`, remove: true })).toMatchObject({ state: "removed", sources: [] });
+    });
+
+    it("remote を明示しても、cwd の git の鍵と同じで作業ツリーが広すぎれば対応づけない(違う remote は判定できないので受ける)", async () => {
+      const home = join(dir, "home");
+      mkdirSync(join(home, ".git"), { recursive: true });
+      vi.stubEnv("HOME", home);
+      vi.stubEnv("USERPROFILE", home);
+      try {
+        const { deps } = uploadDeps();
+        deps.gitOriginUrl = (root) => (root === home ? "git@github.com:me/dotfiles.git" : null);
+        deps.cwd = home;
+        await expect(handleMapSource(deps, { account: A, source: "https://github.com/me/dotfiles.git" })).rejects.toThrow(/too broad.*working tree/);
+        expect(existsSync(join(dir, "accounts", A, "sources.json"))).toBe(false);
+        expect(await handleMapSource(deps, { account: A, source: "github.com/org/a" })).toMatchObject({ state: "added" });
+        deps.cwd = repo;
+        expect(await handleMapSource(deps, { account: A, source: "github.com/org/a", remove: true })).toMatchObject({ state: "removed" });
+        expect(await handleMapSource(deps, { account: A, source: "github.com/org/a" })).toMatchObject({ state: "added" });
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("候補が広すぎる場所なら、対応づけられないと案内する", async () => {
+      const { deps } = uploadDeps();
+      deps.cwd = homedir();
+      const r = await handleMapSource(deps, { account: A });
+      expect(r).toMatchObject({ state: "candidate", source: homedir() });
+      expect(r.next).toMatch(/cannot be mapped/);
+    });
+
+    it("ホームを丸ごと git で管理していれば、その remote は suggest_map にも候補にも出さない", async () => {
+      const home = join(dir, "home");
+      mkdirSync(join(home, ".git"), { recursive: true });
+      mkdirSync(join(home, "Downloads"));
+      const invoice = join(home, "Downloads", "inv.csv");
+      writeFileSync(invoice, "x");
+      vi.stubEnv("HOME", home);
+      vi.stubEnv("USERPROFILE", home);
+      try {
+        const { deps } = uploadDeps();
+        deps.gitOriginUrl = (root) => (root === home ? "git@github.com:me/dotfiles.git" : null);
+        const r = await handleUpload(deps, { path: invoice, account: A });
+        expect(r).toMatchObject({ account: A });
+        expect(r).not.toHaveProperty("suggest_map");
+        const candidate = await handleMapSource(deps, { account: A, path: invoice });
+        expect(candidate).toMatchObject({ state: "candidate", source: "github.com/me/dotfiles" });
+        expect(candidate.next).toMatch(/cannot be mapped.*working tree/);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("path の相対指定は cwd 基準で解決する", async () => {
+      const { deps } = uploadDeps();
+      deps.cwd = repo;
+      expect(await handleMapSource(deps, { account: A, path: "r.csv" })).toMatchObject({ state: "candidate", source: "github.com/org/a" });
+    });
+
+    it("ログインしていないアカウントと、鍵にならない source は書かずに弾く", async () => {
+      const { deps } = uploadDeps();
+      await expect(handleMapSource(deps, { account: "c@example.com", source: "github.com/org/a" })).rejects.toThrow(/c@example.com is not signed in.*a@example.com, b@example.com/);
+      await expect(handleMapSource(deps, { account: A, source: "./rel" })).rejects.toThrow(/absolute path/);
+      await expect(handleMapSource(deps, { account: A, source: "org/a" })).rejects.toThrow(/github\.com\/owner\/repo/);
+      expect(existsSync(join(dir, "accounts", A, "sources.json"))).toBe(false);
+    });
+  });
+});
+
+describe("0.4.0 の token.json からの移行(写し)", () => {
+  const legacy = () => join(dir, "token.json");
+  const SECRET = JSON.stringify({ installed: { client_id: "file-id", client_secret: "file-sec" } });
+  const refreshOk: Route = (url, init) => (url.includes("/token") ? new Response(JSON.stringify({ access_token: "new", expires_in: 3600 })) : okAbout(url, init));
+
+  it("account があれば、1回 refresh して通ることを確かめてからその枠へ写し、元の token.json は書き換えずに残す", async () => {
+    writeFileSync(clientSecretPath(dir), SECRET);
+    const original = JSON.stringify({ refresh_token: "ref", access_token: "acc", expires_at: NOW + 600_000, account: "me@example.com" });
+    writeFileSync(legacy(), original);
+    const deps = makeDeps(dir, {}, refreshOk);
+    const status = await handleStatus(deps);
+    expect(status).toMatchObject({ state: "ready", account: "me@example.com", client_source: "file", resolved: { account: "me@example.com", by: "only_account" } });
+    expect(readFileSync(legacy(), "utf-8")).toBe(original);
+    expect(loadToken(join(dir, "accounts", "me@example.com"))).toMatchObject({ refresh_token: "ref", access_token: "new", account: "me@example.com", client_source: "file" });
+    expect(parseClientSecret(readFileSync(clientSecretPath(join(dir, "accounts", "me@example.com")), "utf-8"))).toEqual({ clientId: "file-id", clientSecret: "file-sec" });
+    expect(deps.calls.filter((u) => u.includes("/token"))).toHaveLength(1);
+    expect(deps.calls.filter((u) => u.includes("/about"))).toHaveLength(1);
+    // 写した後は旧ファイルを読まない。消してよいことを案内する
+    expect(status.message).toMatch(/rm ".*token\.json"/);
+  });
+
+  it("写した後の呼び出しでは、旧ファイルのために refresh しない(account の無いトークンも)", async () => {
+    writeFileSync(legacy(), JSON.stringify({ refresh_token: "ref" }));
+    const deps = makeDeps(dir, ENV_CREDS, refreshOk);
+    await handleStatus(deps);
+    expect(deps.calls.filter((u) => u.includes("/token"))).toHaveLength(1);
+    const again = makeDeps(dir, ENV_CREDS, refreshOk);
+    await handleStatus(again);
+    expect(again.calls.filter((u) => u.includes("/token"))).toHaveLength(0);
+  });
+
+  it("account が無ければ refresh して about.get でメールを埋めてから写す", async () => {
+    writeFileSync(legacy(), JSON.stringify({ refresh_token: "ref" }));
+    const deps = makeDeps(dir, ENV_CREDS, refreshOk);
+    const status = await handleStatus(deps);
+    expect(status).toMatchObject({ state: "ready", account: "me@example.com", client_source: "env" });
+    expect(existsSync(legacy())).toBe(true);
+    expect(loadToken(join(dir, "accounts", "me@example.com"))).toMatchObject({ refresh_token: "ref", access_token: "new", client_source: "env" });
+  });
+
+  it("同じアカウントの枠が既にあれば写さず、その枠を古いトークンで上書きしない", async () => {
+    signIn(dir, { refresh_token: "ref-new", access_token: "acc", expires_at: NOW + 600_000 });
+    writeFileSync(legacy(), JSON.stringify({ refresh_token: "ref-old", account: "me@example.com" }));
+    const deps = makeDeps(dir, ENV_CREDS, okAbout);
+    expect(await handleStatus(deps)).toMatchObject({ state: "ready" });
+    expect(loadToken(join(dir, "accounts", "me@example.com"))).toMatchObject({ refresh_token: "ref-new" });
+    expect(deps.calls.filter((u) => u.includes("/token"))).toHaveLength(0);
+  });
+
+  it("クライアントが無ければ写さずに待ち、no_client を案内する(ネットワークも使わない)", async () => {
+    writeFileSync(legacy(), JSON.stringify({ refresh_token: "ref", account: "me@example.com" }));
+    const deps = makeDeps(dir, {}, () => undefined);
+    expect(await handleStatus(deps)).toMatchObject({ state: "no_client", accounts: [] });
+    expect(existsSync(join(dir, "accounts"))).toBe(false);
+    expect(deps.calls).toEqual([]);
+
+    // 写しを持つ別の枠があっても、トップレベルのクライアントが無い間は写そうとせず、失敗も削除の案内も出さない
+    saveAccount(dir, "other@example.com", { refresh_token: "r", access_token: "acc", expires_at: NOW + 600_000 }, { clientId: "cid", clientSecret: "csec", source: "file" });
+    const withSlot = await handleStatus(makeDeps(dir, {}, okAbout));
+    expect(withSlot).toMatchObject({ state: "ready", account: "other@example.com" });
+    expect(withSlot.message).toBe("Ready. Signed in as other@example.com.");
+    expect(existsSync(accountDir(dir, "me@example.com"))).toBe(false);
+  });
+
+  it("壊れていれば写さず、token.json を残し、理由付きで no_token と同じ案内をする", async () => {
+    writeFileSync(legacy(), "{broken");
+    const status = await handleStatus(makeDeps(dir, ENV_CREDS, () => undefined));
+    expect(status).toMatchObject({ state: "no_token", accounts: [] });
+    expect(status.message).toMatch(/could not be copied.*corrupted/);
+    expect(status.next_steps[0]).toMatch(/auth_start/);
+    expect(existsSync(legacy())).toBe(true);
+  });
+
+  it("今のクライアントで refresh が通らなければ写さず、その理由の状態(invalid_grant・invalid_client)で返す", async () => {
+    writeFileSync(legacy(), JSON.stringify({ refresh_token: "ref", account: "me@example.com" }));
+    const file = join(dir, "a.csv");
+    writeFileSync(file, "x");
+    const rejected = await handleUpload(makeDeps(dir, ENV_CREDS, invalidGrant), { path: file }).catch((e: unknown) => e);
+    expect(rejected).toMatchObject({ message: expect.stringMatching(/of me@example\.com .*could not be copied.*invalid_grant/), status: { state: "token_invalid", message: expect.stringMatching(/could not be copied.*invalid_grant/) } });
+    expect((rejected as DriveliftError).status?.next_steps[0]).toMatch(/auth_start with login_hint: me@example\.com/);
+    // map_source も not signed in でなく同じ理由で弾く
+    await expect(handleMapSource(makeDeps(dir, ENV_CREDS, invalidGrant), { account: "me@example.com", source: "github.com/o/r" })).rejects.toMatchObject({ status: { state: "token_invalid", message: expect.stringMatching(/invalid_grant/) } });
+    // 別の内容のトークン(印と一致しない)は改めて refresh する
+    writeFileSync(legacy(), JSON.stringify({ refresh_token: "ref-2", account: "me@example.com" }));
+    const invalidClient: Route = (url) => (url.includes("/token") ? new Response(JSON.stringify({ error: "invalid_client" }), { status: 401 }) : undefined);
+    const status = await handleStatus(makeDeps(dir, ENV_CREDS, invalidClient));
+    expect(status).toMatchObject({ state: "token_invalid", accounts: [] });
+    expect(status.next_steps.join("\n")).toMatch(/import_client_secret/);
+    expect(existsSync(join(dir, "accounts"))).toBe(false);
+    expect(existsSync(legacy())).toBe(true);
+  });
+
+  it("通信に失敗したら写さず、no_token とは報告しない(状態が分からないので通信の失敗として返す)", async () => {
+    writeFileSync(legacy(), JSON.stringify({ refresh_token: "ref", account: "me@example.com" }));
+    const offline = makeDeps(dir, ENV_CREDS, () => {
+      throw new TypeError("fetch failed");
+    });
+    const error = await handleStatus(offline).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(DriveliftError);
+    expect((error as DriveliftError).message).toMatch(/could not be copied.*fetch failed.*network/);
+    expect((error as DriveliftError).status).toBeUndefined();
+    expect(existsSync(join(dir, "accounts"))).toBe(false);
+
+    // 枠がほかにあれば status は落とさず、message に理由を載せる
+    signIn(dir, { refresh_token: "r", access_token: "acc", expires_at: NOW + 600_000 }, "other@example.com");
+    const deps = makeDeps(dir, ENV_CREDS, (url, init) => {
+      if (url.includes("/token")) throw new TypeError("fetch failed");
+      return okAbout(url, init);
+    });
+    const status = await handleStatus(deps);
+    expect(status).toMatchObject({ state: "ready", account: "other@example.com" });
+    expect(status.message).toMatch(/could not be copied.*fetch failed/);
+  });
+
+  it("通信の失敗では印を残さず、map_source も通信の失敗として返し、次の呼び出しで再試行する", async () => {
+    writeFileSync(legacy(), JSON.stringify({ refresh_token: "ref", account: "me@example.com" }));
+    const offline = makeDeps(dir, ENV_CREDS, () => {
+      throw new TypeError("fetch failed");
+    });
+    await expect(handleMapSource(offline, { account: "me@example.com", source: "github.com/o/r" })).rejects.toThrow(/could not be copied.*fetch failed.*network/);
+    expect(existsSync(join(dir, "legacy-migration.json"))).toBe(false);
+    const online = makeDeps(dir, ENV_CREDS, refreshOk);
+    expect(await handleStatus(online)).toMatchObject({ state: "ready", account: "me@example.com" });
+    expect(online.calls.filter((u) => u.includes("/token"))).toHaveLength(1);
+  });
+
+  describe("写し済み・写せなかった印があれば、同じ内容の token.json では refresh しない", () => {
+    const tokenCalls = (deps: { calls: string[] }) => deps.calls.filter((u) => u.includes("/token")).length;
+
+    it("同じアカウントで先にログインし直していた(refresh_token が違う)", async () => {
+      signIn(dir, { refresh_token: "ref-new", access_token: "acc", expires_at: NOW + 600_000 });
+      writeFileSync(legacy(), JSON.stringify({ refresh_token: "ref-old" }));
+      const first = makeDeps(dir, ENV_CREDS, refreshOk);
+      await handleStatus(first);
+      expect(tokenCalls(first)).toBe(1);
+      for (let i = 0; i < 2; i++) {
+        const again = makeDeps(dir, ENV_CREDS, refreshOk);
+        expect((await handleStatus(again)).message).toMatch(/rm ".*token\.json"/);
+        expect(tokenCalls(again)).toBe(0);
+      }
+      expect(loadToken(join(dir, "accounts", "me@example.com"))).toMatchObject({ refresh_token: "ref-new" });
+    });
+
+    it("refresh で refresh_token がローテーションされた", async () => {
+      writeFileSync(legacy(), JSON.stringify({ refresh_token: "ref" }));
+      const rotating: Route = (url, init) => (url.includes("/token") ? new Response(JSON.stringify({ access_token: "new", refresh_token: "rotated", expires_in: 3600 })) : okAbout(url, init));
+      await handleStatus(makeDeps(dir, ENV_CREDS, rotating));
+      expect(loadToken(join(dir, "accounts", "me@example.com"))).toMatchObject({ refresh_token: "rotated" });
+      for (let i = 0; i < 2; i++) {
+        const again = makeDeps(dir, ENV_CREDS, rotating);
+        await handleStatus(again);
+        expect(tokenCalls(again)).toBe(0);
+      }
+    });
+
+    it("失効していて、ほかの枠がある", async () => {
+      signIn(dir, { refresh_token: "r", access_token: "acc", expires_at: NOW + 600_000 }, "other@example.com");
+      writeFileSync(legacy(), JSON.stringify({ refresh_token: "ref" }));
+      const revoked: Route = (url, init) => invalidGrant(url, init) ?? okAbout(url, init);
+      const first = makeDeps(dir, ENV_CREDS, revoked);
+      expect((await handleStatus(first)).message).toMatch(/could not be copied.*invalid_grant.*rm ".*token\.json"/);
+      expect(tokenCalls(first)).toBe(1);
+      for (let i = 0; i < 2; i++) {
+        const again = makeDeps(dir, ENV_CREDS, revoked);
+        const status = await handleStatus(again);
+        expect(status).toMatchObject({ state: "ready", account: "other@example.com" });
+        expect(status.message).toMatch(/could not be copied.*invalid_grant.*rm ".*token\.json"/);
+        expect(tokenCalls(again)).toBe(0);
+      }
+    });
+
+    it("token.json の内容が変われば(0.4.0 でログインし直した等)写し直す", async () => {
+      writeFileSync(legacy(), JSON.stringify({ refresh_token: "ref" }));
+      await handleStatus(makeDeps(dir, ENV_CREDS, refreshOk));
+      writeFileSync(legacy(), JSON.stringify({ refresh_token: "ref-relogin" }));
+      const changed = makeDeps(dir, ENV_CREDS, refreshOk);
+      await handleStatus(changed);
+      expect(tokenCalls(changed)).toBe(1);
+    });
+  });
+
+  it("ログインし直しても token.json は消さない(0.4.0 が使い続けられる)", async () => {
+    writeFileSync(legacy(), "{broken");
+    const deps = makeDeps(dir, ENV_CREDS, (url, init) => (url.includes("/token") ? new Response(JSON.stringify({ access_token: "acc", refresh_token: "ref", expires_in: 3600 })) : okAbout(url, init)));
+    deps.openBrowser = async (url) => {
+      const state = new URL(url).searchParams.get("state");
+      const port = new URL(new URL(url).searchParams.get("redirect_uri") as string).port;
+      setTimeout(() => void fetch(`http://127.0.0.1:${port}/callback?code=C&state=${state}`), 10);
+      return true;
+    };
+    expect(await handleAuthStart(deps, { wait_seconds: 5 })).toMatchObject({ state: "completed", account: "me@example.com" });
+    expect(readFileSync(legacy(), "utf-8")).toBe("{broken");
+  });
+});
+
+describe("枠ごとのクライアントとトークンの置き場所", () => {
+  it("file でログインした枠は、env に別のクライアントがあっても写しのクライアントで refresh する", async () => {
+    saveAccount(dir, "me@example.com", { refresh_token: "ref", access_token: "old", expires_at: NOW - 1 }, { clientId: "copy-id", clientSecret: "copy-sec", source: "file" });
+    const bodies: string[] = [];
+    const deps = makeDeps(dir, { DRIVELIFT_CLIENT_ID: "env-id", DRIVELIFT_CLIENT_SECRET: "env-sec" }, (url, init) => {
+      if (url.includes("/token")) {
+        bodies.push(String(init?.body));
+        return new Response(JSON.stringify({ access_token: "new", expires_in: 3600 }));
+      }
+      return okAbout(url, init);
+    });
+    expect(await handleStatus(deps)).toMatchObject({ state: "ready", client_source: "file" });
+    expect(bodies.map((b) => new URLSearchParams(b).get("client_id"))).toEqual(["copy-id"]);
+  });
+
+  it("期限切れの枠で upload / status を通すと、その枠の token.json が更新され、トップレベルに token.json はできない", async () => {
+    signIn(dir, { refresh_token: "ref", access_token: "old", expires_at: NOW - 1 });
+    const file = join(dir, "a.csv");
+    writeFileSync(file, "x");
+    let n = 0;
+    const deps = makeDeps(dir, ENV_CREDS, (url, init) => {
+      if (url.includes("/token")) return new Response(JSON.stringify({ access_token: `new-${++n}`, expires_in: 1 }));
+      if (url.includes("/upload/drive/v3/files")) return new Response(null, { headers: { Location: "https://upload.test/s" } });
+      if (url === "https://upload.test/s") return new Response(JSON.stringify({ id: "f1" }));
+      return okAbout(url, init);
+    });
+    await handleUpload(deps, { path: file });
+    expect(loadToken(accountDir(dir, "me@example.com"))).toMatchObject({ access_token: "new-1", account: "me@example.com", client_source: "env" });
+    expect(existsSync(join(dir, "token.json"))).toBe(false);
+    await handleStatus(deps);
+    expect(loadToken(accountDir(dir, "me@example.com"))).toMatchObject({ access_token: "new-2" });
+    expect(existsSync(join(dir, "token.json"))).toBe(false);
+  });
+
+  it("token_invalid の案内は、その枠のメールを login_hint に入れる", async () => {
+    signIn(dir, { refresh_token: "ref" });
+    const status = await handleStatus(makeDeps(dir, ENV_CREDS, invalidGrant));
+    expect(status.state).toBe("token_invalid");
+    expect(status.next_steps.join("\n")).toContain("login_hint: me@example.com");
+  });
+});
+
+describe("再ログイン", () => {
+  it("login_hint を認可 URL に載せ、同じメールの再ログインは自分の枠だけを差し替える", async () => {
+    signIn(dir, { refresh_token: "ref-a-old" }, "a@example.com");
+    signIn(dir, { refresh_token: "ref-b" }, "b@example.com");
+    await handleMapSource(makeDeps(dir, ENV_CREDS, () => undefined), { account: "b@example.com", source: "github.com/org/b" });
+    const before = readdirSync(join(dir, "accounts", "b@example.com")).map((name) => readFileSync(join(dir, "accounts", "b@example.com", name), "utf-8"));
+
+    const deps = makeDeps(dir, ENV_CREDS, (url) => {
+      if (url.includes("/token")) return new Response(JSON.stringify({ access_token: "acc-new", refresh_token: "ref-a-new", expires_in: 3600 }));
+      if (url.includes("/drive/v3/about")) return new Response(JSON.stringify({ user: { emailAddress: "a@example.com" } }));
+      return undefined;
+    });
+    const started = await handleAuthStart(deps, { wait_seconds: 0, login_hint: "a@example.com" });
+    const authUrl = new URL(started.url);
+    expect(authUrl.searchParams.get("login_hint")).toBe("a@example.com");
+    expect(authUrl.searchParams.get("prompt")).toBe("select_account consent");
+    const port = new URL(authUrl.searchParams.get("redirect_uri") as string).port;
+    await fetch(`http://127.0.0.1:${port}/callback?code=C&state=${authUrl.searchParams.get("state")}`);
+    await expect(handleAuthStatus(deps, { wait_seconds: 5 })).resolves.toMatchObject({ state: "completed", account: "a@example.com" });
+
+    expect(loadToken(join(dir, "accounts", "a@example.com"))).toMatchObject({ refresh_token: "ref-a-new" });
+    const after = readdirSync(join(dir, "accounts", "b@example.com")).map((name) => readFileSync(join(dir, "accounts", "b@example.com", name), "utf-8"));
+    expect(after).toEqual(before);
+  });
+
+  it("空の login_hint はログインを始めずに弾く", async () => {
+    await expect(handleAuthStart(makeDeps(dir, ENV_CREDS, () => undefined), { login_hint: " " })).rejects.toThrow(/login_hint is empty/);
+  });
+});
+
+describe("枠ごとの状態", () => {
+  it("壊れた枠は token_invalid で、ほかの枠の状態は出せる。env でログインした枠を環境変数なしで使うと no_client", async () => {
+    signIn(dir, { refresh_token: "r", access_token: "acc", expires_at: NOW + 600_000 }, "a@example.com");
+    mkdirSync(join(dir, "accounts", "b@example.com"));
+    writeFileSync(join(dir, "accounts", "b@example.com", "token.json"), "{broken");
+    const status = await handleStatus(makeDeps(dir, ENV_CREDS, okAbout));
+    expect(status.accounts?.map((a) => [a.email, a.state])).toEqual([["a@example.com", "ready"], ["b@example.com", "token_invalid"]]);
+
+    const noEnv = await handleStatus({ ...makeDeps(dir, {}, okAbout), env: { DRIVELIFT_ACCOUNT: "a@example.com" } });
+    expect(noEnv).toMatchObject({ state: "no_client", client_source: "env", resolved: { account: "a@example.com", by: "env" } });
+    expect(noEnv.message).toMatch(/DRIVELIFT_CLIENT_ID/);
   });
 });

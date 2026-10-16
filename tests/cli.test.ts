@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { main, parseShareArg } from "../src/cli.js";
-import { saveToken } from "../src/config.js";
+import { saveAccount } from "../src/config.js";
+import { defaultDeps } from "../src/core.js";
 
 describe("cli", () => {
   // main() は既定の設定ディレクトリを使う。入力チェックが退行したときにテストが本物のトークンで Drive へ送らないよう、空のディレクトリに向ける
@@ -48,13 +49,35 @@ describe("cli", () => {
     }
   });
 
+  it("map は source 省略で候補を表示して 2、書いたら 0。引数の誤りは 2", async () => {
+    saveAccount(configDir, "me@example.com", { refresh_token: "ref" }, { clientId: "cid", clientSecret: "csec", source: "file" });
+    // 実行中のリポジトリの git に依存しないよう、remote を差し替える
+    const deps = { ...defaultDeps(), gitOriginUrl: () => "git@github.com:org/a.git" };
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const out = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      expect(await main(["map"], deps)).toBe(2);
+      expect(await main(["map", "me@example.com", "a", "b"], deps)).toBe(2);
+      expect(await main(["map", "other@example.com", "github.com/org/a"], deps)).toBe(2);
+      expect(await main(["map", "me@example.com", "org/a"], deps)).toBe(2);
+      expect(await main(["map", "me@example.com"], deps)).toBe(2);
+      expect(out.mock.calls.map((c) => String(c[0])).join("")).toMatch(/Re-run to map it: drivelift map me@example.com github\.com\/org\/a\n/);
+      expect(await main(["map", "me@example.com", "github.com/org/a"], deps)).toBe(0);
+      expect(await main(["map", "me@example.com", "github.com/org/a", "--remove"], deps)).toBe(0);
+      expect(out.mock.calls.map((c) => String(c[0])).join("")).toMatch(/Unmapped github.com\/org\/a/);
+    } finally {
+      err.mockRestore();
+      out.mockRestore();
+    }
+  });
+
   describe("--share-new-folder", () => {
     let savedEnv: Record<string, string | undefined>;
     beforeEach(() => {
       savedEnv = { id: process.env["DRIVELIFT_CLIENT_ID"], secret: process.env["DRIVELIFT_CLIENT_SECRET"] };
       process.env["DRIVELIFT_CLIENT_ID"] = "cid";
       process.env["DRIVELIFT_CLIENT_SECRET"] = "csec";
-      saveToken(configDir, { refresh_token: "ref", access_token: "acc", expires_at: Date.now() + 600_000 });
+      saveAccount(configDir, "me@example.com", { refresh_token: "ref", access_token: "acc", expires_at: Date.now() + 600_000 }, { clientId: "cid", clientSecret: "csec", source: "env" });
       writeFileSync(join(configDir, "r.csv"), "a,b");
     });
     afterEach(() => {

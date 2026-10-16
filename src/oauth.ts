@@ -3,7 +3,7 @@
  *
  * 1. 127.0.0.1 の空きポートで HTTP を待ち受け、その URL を redirect_uri にして認可 URL を組む(PKCE 付き)
  * 2. ブラウザで同意が済むと Google がそのポートへ code を返す
- * 3. code を token endpoint で refresh_token / access_token に交換し token.json に保存する
+ * 3. code を token endpoint で refresh_token / access_token に交換し、about.get で取れたメールアドレスの枠(accounts/<email>/)に保存する
  *
  * Desktop 種別のクライアントは redirect_uri の事前登録なしにループバックの任意ポートを許すため、
  * ホスティングも固定ポートも要らない。
@@ -12,9 +12,9 @@ import { createHash, randomBytes } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { ClientCredentials, StoredToken } from "./config.js";
-import { loadToken, saveToken } from "./config.js";
-import { driveAbout, type FetchLike } from "./drive.js";
-import { DriveliftError } from "./errors.js";
+import { loadToken, saveAccount, saveToken } from "./config.js";
+import { DriveRequestError, driveAbout, type FetchLike } from "./drive.js";
+import { DriveliftError, TokenRefreshError } from "./errors.js";
 import { tokenInvalidStatus } from "./status.js";
 
 export const DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file";
@@ -53,7 +53,7 @@ function pkcePair(): { verifier: string; challenge: string } {
 }
 
 export interface LoginResult {
-  account: string | null;
+  account: string;
 }
 
 export interface LoginSession {
@@ -71,6 +71,8 @@ export interface StartLoginOptions {
   fetchImpl: FetchLike;
   now: () => number;
   timeoutMs: number;
+  /** 認可画面で選ばせたいアカウントのメールアドレス。 */
+  loginHint?: string;
 }
 
 function escapeHtml(text: string): string {
@@ -146,7 +148,7 @@ export async function startLoginSession(opts: StartLoginOptions): Promise<LoginS
       exchanging = true;
       void exchangeCode(code)
         .then((result) => {
-          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(htmlPage("drivelift: signed in", `${result.account ? `Signed in as ${result.account}. ` : ""}You can close this tab and return to your agent.`));
+          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(htmlPage("drivelift: signed in", `Signed in as ${result.account}. You can close this tab and return to your agent.`));
           finish({ ok: true, result });
         })
         .catch((err: unknown) => {
@@ -178,15 +180,16 @@ export async function startLoginSession(opts: StartLoginOptions): Promise<LoginS
       access_token: body.access_token,
       expires_at: opts.now() + (body.expires_in ?? 3600) * 1000,
     };
-    // メールアドレスは表示用。Drive API 未有効化などで取れなくてもログイン自体は成立させる
-    let account: string | null = null;
+    // 枠の名前がメールアドレスなので、取れなければ保存先が決まらない
+    let account: string | null;
     try {
       account = (await driveAbout(body.access_token, opts.fetchImpl)).emailAddress;
-    } catch {
-      account = null;
+    } catch (error) {
+      const hint = error instanceof DriveRequestError && error.failure.kind === "api_disabled" ? ` Enable the Drive API (${error.failure.enableUrl ?? "see status"}), wait a minute, then sign in again.` : "";
+      throw new DriveliftError(`Signed in, but could not read the account's email address from Drive (${error instanceof Error ? error.message : String(error)}), so the sign-in was not saved.${hint}`);
     }
-    if (account) token.account = account;
-    saveToken(opts.configDir, token);
+    if (!account) throw new DriveliftError("Signed in, but Drive did not return the account's email address, so the sign-in was not saved.");
+    saveAccount(opts.configDir, account, token, opts.creds);
     return { account };
   }
 
@@ -196,12 +199,14 @@ export async function startLoginSession(opts: StartLoginOptions): Promise<LoginS
     response_type: "code",
     scope: DRIVE_FILE_SCOPE,
     access_type: "offline",
-    // 既に同意済みのアカウントでも refresh_token を再発行させる
-    prompt: "consent",
+    // select_account: ブラウザに複数の Google セッションがあれば選ばせる(枠の追加で前のアカウントを黙って使わない)
+    // consent: 既に同意済みのアカウントでも refresh_token を再発行させる
+    prompt: "select_account consent",
     code_challenge: challenge,
     code_challenge_method: "S256",
     state,
   });
+  if (opts.loginHint) params.set("login_hint", opts.loginHint);
 
   timer = setTimeout(() => finish({ ok: false, error: new DriveliftError(`Sign-in timed out after ${Math.round(opts.timeoutMs / 1000)}s. Call auth_start again.`) }), opts.timeoutMs);
   timer.unref();
@@ -214,6 +219,7 @@ export async function startLoginSession(opts: StartLoginOptions): Promise<LoginS
   };
 }
 
+/** 保存はしない(呼び出し側が置き場所を決める)。configDir は失敗時の Status に載せる設定ディレクトリ。 */
 export async function refreshAccessToken(creds: ClientCredentials, token: StoredToken, fetchImpl: FetchLike, now: () => number, configDir: string): Promise<StoredToken & { access_token: string }> {
   const body = await postToken(fetchImpl, {
     client_id: creds.clientId,
@@ -223,7 +229,7 @@ export async function refreshAccessToken(creds: ClientCredentials, token: Stored
   });
   if (body.error || !body.access_token) {
     const reason = body.error ? `${body.error}${body.error_description ? `: ${body.error_description}` : ""}` : "no access_token in response";
-    throw new DriveliftError(`Token refresh failed (${reason}).`, tokenInvalidStatus(configDir, reason, body.error ?? null));
+    throw new TokenRefreshError(`Token refresh failed (${reason}).`, tokenInvalidStatus(configDir, reason, body.error ?? null, token.account ?? null), body.error ?? null, reason);
   }
   const refreshed: StoredToken & { access_token: string } = {
     ...token,
@@ -231,17 +237,17 @@ export async function refreshAccessToken(creds: ClientCredentials, token: Stored
     access_token: body.access_token,
     expires_at: now() + (body.expires_in ?? 3600) * 1000,
   };
-  saveToken(configDir, refreshed);
   return refreshed;
 }
 
 /** 有効な access_token を返す(期限が近ければ refresh)。token.json が無ければ null。 */
-export async function getAccessToken(creds: ClientCredentials, configDir: string, fetchImpl: FetchLike, now: () => number): Promise<{ accessToken: string; token: StoredToken } | null> {
-  const stored = loadToken(configDir);
+export async function getAccessToken(creds: ClientCredentials, tokenDir: string, fetchImpl: FetchLike, now: () => number, configDir: string): Promise<{ accessToken: string; token: StoredToken } | null> {
+  const stored = loadToken(tokenDir);
   if (!stored) return null;
   if (stored.access_token && stored.expires_at && stored.expires_at - EXPIRY_MARGIN_MS > now()) {
     return { accessToken: stored.access_token, token: stored };
   }
   const refreshed = await refreshAccessToken(creds, stored, fetchImpl, now, configDir);
+  saveToken(tokenDir, refreshed);
   return { accessToken: refreshed.access_token, token: refreshed };
 }

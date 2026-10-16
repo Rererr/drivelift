@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { clientSecretPath, loadClientCredentials, loadToken, parseClientSecret, resolveConfigDir, saveClientSecret, saveToken, tokenPath } from "../src/config.js";
+import { accountDir, clientSecretPath, loadClientCredentials, loadToken, parseClientSecret, resolveConfigDir, saveAccount, saveClientSecret, saveToken, tokenPath } from "../src/config.js";
 import { DriveliftError } from "../src/errors.js";
 
 const VALID = JSON.stringify({ installed: { client_id: "id-1", client_secret: "sec-1", redirect_uris: ["http://localhost"] } });
@@ -52,21 +52,19 @@ describe("loadClientCredentials", () => {
 describe("saveClientSecret / token", () => {
   it("検証してから 0600 で保存する", () => {
     const sub = join(dir, "nested");
-    const { path: saved, tokenCleared } = saveClientSecret(sub, VALID);
+    const { path: saved } = saveClientSecret(sub, VALID);
     expect(saved).toBe(clientSecretPath(sub));
-    expect(tokenCleared).toBe(false);
     expect(statSync(saved).mode & 0o777).toBe(0o600);
     expect(() => saveClientSecret(sub, "{}")).toThrow(DriveliftError);
   });
 
-  it("client_id が変わる取り込みでは token.json を消し、同じ client_id なら残す", () => {
+  it("別の client_id を取り込んでもログイン済みの枠には触らない(各枠は自分のクライアントの写しで refresh する)", () => {
     saveClientSecret(dir, VALID);
-    saveToken(dir, { refresh_token: "r" });
-    expect(saveClientSecret(dir, VALID).tokenCleared).toBe(false);
-    expect(loadToken(dir)).not.toBeNull();
-    const other = JSON.stringify({ installed: { client_id: "id-2", client_secret: "sec-2" } });
-    expect(saveClientSecret(dir, other).tokenCleared).toBe(true);
-    expect(loadToken(dir)).toBeNull();
+    saveAccount(dir, "me@example.com", { refresh_token: "r" }, { clientId: "id-1", clientSecret: "sec-1", source: "file" });
+    saveClientSecret(dir, JSON.stringify({ installed: { client_id: "id-2", client_secret: "sec-2" } }));
+    const slot = accountDir(dir, "me@example.com");
+    expect(loadToken(slot)).toMatchObject({ refresh_token: "r", client_source: "file" });
+    expect(parseClientSecret(readFileSync(clientSecretPath(slot), "utf-8"))).toEqual({ clientId: "id-1", clientSecret: "sec-1" });
   });
 
   it("既存の 0644 ファイルへ保存し直しても 0600 に戻す", () => {

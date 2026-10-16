@@ -4,21 +4,23 @@
  *
  *   drivelift                       MCP stdio サーバーとして起動(.mcp.json の "command": "drivelift" 用)
  *   drivelift serve                 同上
- *   drivelift doctor                導入状態と次の一手を表示
- *   drivelift login                 ブラウザで Google ログイン(完了まで待つ)
+ *   drivelift doctor                導入状態と次の一手、ログイン済みのアカウントと cwd から解決される枠を表示
+ *   drivelift login [--hint EMAIL]  ブラウザで Google ログイン(完了まで待つ)。アカウントごとに枠ができる
  *   drivelift import-secret [path]  client_secret JSON を取り込む(省略時は ~/Downloads の候補を列挙)
  *   drivelift setup-gcloud [--project ID] [--yes]  gcloud で手順 1-2 を実行(--yes なしは計画表示)
- *   drivelift upload <file> [--folder ID] [--folder-path A/B] [--name N] [--convert MODE]
+ *   drivelift upload <file> [--account EMAIL] [--folder ID] [--folder-path A/B] [--name N] [--convert MODE]
  *                    [--share ROLE:TYPE[:TARGET]]... [--share-new-folder] [--notify] [--replace ID] [--json]
+ *   drivelift map <email> [source] [--remove]  到達元をアカウントに対応づける/外す(source 省略時は cwd の鍵を表示するだけ)
  *
- * 終了コード: 0 成功 / 1 実行時エラー / 2 使い方の誤り・未導入(doctor) / 3 アップロードは成功したが共有の一部が失敗
+ * 終了コード: 0 成功 / 1 実行時エラー / 2 使い方の誤り・未導入(doctor)・アカウントが決まらない・map の候補表示 / 3 アップロードは成功したが共有の一部が失敗
  *                                アップロードして URL を出力(--json で全項目)
  */
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { defaultDeps, handleAuthStart, handleGcloudSetup, handleImportClientSecret, handleStatus, handleUpload, waitForLogin } from "./core.js";
-import { DriveliftError, DriveliftInputError } from "./errors.js";
+import { defaultDeps, handleAuthStart, handleGcloudSetup, handleImportClientSecret, handleMapSource, handleStatus, handleUpload, waitForLogin, type Deps } from "./core.js";
+import { AccountUnresolvedError, DriveliftError, DriveliftInputError } from "./errors.js";
+import { accountsDir } from "./config.js";
 import type { ShareSpec } from "./drive.js";
 import { CONVERT_MODES, type ConvertMode } from "./mime.js";
 import { runServer } from "./server.js";
@@ -29,13 +31,17 @@ const USAGE = `drivelift ${resolvePackageVersion()} — carry local files into G
 
 Usage:
   drivelift [serve]                         run as MCP stdio server
-  drivelift doctor                          show setup status and next steps
-  drivelift login                           sign in with Google (opens browser)
+  drivelift doctor                          show setup status, signed-in accounts and the one
+                                         used from the current directory
+  drivelift login [--hint <email>]          sign in with Google (opens browser); each account
+                                         gets its own slot
   drivelift import-secret [path]            import a downloaded OAuth client JSON
   drivelift setup-gcloud [--project <id>] [--yes]
                                          create/select a project and enable the Drive API via gcloud
                                          (without --yes: show the plan only)
   drivelift upload <file> [options]         upload (and convert) a file, print its URL
+      --account <email>  signed-in account to upload with (default: DRIVELIFT_ACCOUNT, the
+                       account mapped to this repository/directory, or the only account)
       --folder <id>    destination folder ID
       --folder-path <a/b>  find or create folders (drivelift-made) under --folder or My Drive
       --name <name>    name in Drive
@@ -48,6 +54,10 @@ Usage:
                        creating a new file; refused if trashed, renamed or a different kind
       --convert <mode> auto | none | spreadsheet | document | presentation (default auto)
       --json           print the full result as JSON
+  drivelift map <email> [source] [--remove]
+                                         map a source (git remote like github.com/org/repo, or an
+                                         absolute path) to an account; without source, print the
+                                         current directory's source and change nothing
   drivelift --help | --version
 `;
 
@@ -78,6 +88,7 @@ function parseUploadArgsRaw(args: string[]) {
       "share-new-folder": { type: "boolean", default: false },
       notify: { type: "boolean", default: false },
       replace: { type: "string" },
+      account: { type: "string" },
       name: { type: "string" },
       convert: { type: "string" },
       json: { type: "boolean", default: false },
@@ -97,6 +108,16 @@ function formatStatus(status: Status): string {
   const lines = [`state: ${status.state}`, status.message];
   if (status.account) lines.push(`account: ${status.account}`);
   lines.push(`config: ${status.config_dir}`);
+  if (status.accounts) {
+    lines.push("", "accounts:");
+    if (status.accounts.length === 0) lines.push("  (none)");
+    for (const a of status.accounts) lines.push(`  ${a.email}  ${a.state}  client: ${a.client_source ?? "-"}  sources: ${a.sources.length > 0 ? a.sources.join(", ") : "-"}`);
+    if (status.accounts.length > 0) lines.push(`  (to remove an account: rm -r "${accountsDir(status.config_dir)}/<email>")`);
+  }
+  if (status.resolved) {
+    const r = status.resolved;
+    lines.push(`resolved: ${r.account === null ? `none — ${r.reason}` : `${r.account} (by ${r.by})`}`, `source: ${r.source ?? "-"}`);
+  }
   if (!status.ready) {
     lines.push("", "next steps:");
     for (const step of status.next_steps) lines.push(`  ${step}`);
@@ -108,12 +129,13 @@ function printError(error: unknown): void {
   if (error instanceof DriveliftError) {
     console.error(`error: ${error.message}`);
     if (error.status) console.error("", formatStatus(error.status));
+    if (error instanceof AccountUnresolvedError) console.error(`\ncandidates: ${error.candidates.join(", ")}\nsource: ${error.source ?? "-"}`);
     return;
   }
   console.error("unexpected error:", error);
 }
 
-export async function main(argv: string[]): Promise<number> {
+export async function main(argv: string[], deps: Deps = defaultDeps()): Promise<number> {
   const [command, ...rest] = argv;
   if (command === undefined || command === "serve") {
     await runServer();
@@ -128,7 +150,6 @@ export async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
-  const deps = defaultDeps();
   try {
     switch (command) {
       case "doctor": {
@@ -137,10 +158,11 @@ export async function main(argv: string[]): Promise<number> {
         return status.ready ? 0 : 2;
       }
       case "login": {
-        const started = await handleAuthStart(deps, { wait_seconds: 0 });
+        const { values } = parseOrUsage(() => parseArgs({ args: rest, options: { hint: { type: "string" } } }));
+        const started = await handleAuthStart(deps, { wait_seconds: 0, ...(values.hint === undefined ? {} : { login_hint: values.hint }) });
         process.stderr.write(`${started.browser_opened ? "Opened your browser." : "Open this URL in your browser:"}\n${started.url}\n\nWaiting for the sign-in to finish (up to ${started.expires_in_seconds}s)...\n`);
         const { account } = await waitForLogin();
-        process.stdout.write(account ? `Signed in as ${account}.\n` : "Signed in.\n");
+        process.stdout.write(`Signed in as ${account}.\n`);
         return 0;
       }
       case "import-secret": {
@@ -199,6 +221,7 @@ export async function main(argv: string[]): Promise<number> {
           ...(values.name === undefined ? {} : { name: values.name }),
           ...(values.folder === undefined ? {} : { folder_id: values.folder }),
           ...(values.convert === undefined ? {} : { convert: values.convert as ConvertMode }),
+          ...(values.account === undefined ? {} : { account: values.account }),
         });
         process.stdout.write(values.json ? `${JSON.stringify(result, null, 2)}\n` : `${result.url}\n`);
         const failedShares = result.shared.filter((s) => !s.ok);
@@ -207,7 +230,22 @@ export async function main(argv: string[]): Promise<number> {
         for (const s of failedFolderShares) process.stderr.write(`folder share failed: ${s.role}:${s.type}${s.target ? `:${s.target}` : ""} (${s.error ?? "unknown"})\n`);
         // 意図した挙動だが、フォルダの URL を渡しても相手は開けないので知らせる
         if (values["share-new-folder"] && result.folder_shared.length === 0) process.stderr.write("folder not shared: the --folder-path folder already existed, and drivelift never shares a reused folder (share it in Drive if needed)\n");
+        if (result.mapped_to) process.stderr.write(`note: uploaded with ${result.account} as given by --account, but this source is mapped to ${result.mapped_to}.\n`);
+        if (result.suggest_map) process.stderr.write(`${result.suggest_map.source} is not mapped to any account. To use ${result.suggest_map.account} from here without --account: drivelift map ${result.suggest_map.account} ${result.suggest_map.source}\n`);
         return failedShares.length + failedFolderShares.length > 0 ? 3 : 0;
+      }
+      case "map": {
+        const { values, positionals } = parseOrUsage(() => parseArgs({ args: rest, allowPositionals: true, options: { remove: { type: "boolean", default: false } } }));
+        const [account, source] = positionals;
+        if (!account || positionals.length > 2) throw new UsageError(`map takes <email> [source].\n\n${USAGE}`);
+        const result = await handleMapSource(deps, { account, ...(source === undefined ? {} : { source }), ...(values.remove ? { remove: true } : {}) });
+        process.stdout.write(`${result.message}\n`);
+        if (result.state !== "candidate") {
+          process.stdout.write(`sources of ${result.account}: ${result.sources.length > 0 ? result.sources.join(", ") : "-"}\n`);
+          return 0;
+        }
+        process.stdout.write(`Re-run to ${values.remove ? "unmap" : "map"} it: drivelift map ${result.account} ${result.source}${values.remove ? " --remove" : ""}\n`);
+        return 2;
       }
       default:
         process.stderr.write(`unknown command: ${command}\n\n${USAGE}`);

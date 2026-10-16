@@ -1,8 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadToken, saveToken, type ClientCredentials } from "../src/config.js";
+import { accountDir, clientSecretPath, loadToken, saveToken, type ClientCredentials } from "../src/config.js";
 import type { FetchLike } from "../src/drive.js";
 import { DriveliftError } from "../src/errors.js";
 import { getAccessToken, refreshAccessToken, startLoginSession } from "../src/oauth.js";
@@ -63,7 +63,8 @@ describe("startLoginSession", () => {
     expect(params.get("grant_type")).toBe("authorization_code");
     expect(params.get("code_verifier")).toBeTruthy();
     expect(params.get("redirect_uri")).toBe(`http://127.0.0.1:${session.port}/callback`);
-    expect(loadToken(dir)).toEqual({ refresh_token: "ref", access_token: "acc", expires_at: NOW + 3_600_000, account: "me@example.com" });
+    expect(loadToken(accountDir(dir, "me@example.com"))).toEqual({ refresh_token: "ref", access_token: "acc", expires_at: NOW + 3_600_000, account: "me@example.com", client_source: "file" });
+    expect(existsSync(clientSecretPath(accountDir(dir, "me@example.com")))).toBe(true);
 
     // 決着後はサーバーが閉じている
     await expect(fetch(`http://127.0.0.1:${session.port}/callback`)).rejects.toThrow();
@@ -77,7 +78,7 @@ describe("startLoginSession", () => {
     const res = await fetch(`http://127.0.0.1:${session.port}/callback?error=access_denied&state=${state}`);
     expect(res.status).toBe(400);
     await expect(failed).resolves.toBeInstanceOf(DriveliftError);
-    expect(loadToken(dir)).toBeNull();
+    expect(existsSync(accountDir(dir, "me@example.com"))).toBe(false);
   });
 
   it("state の無い error リクエストは無視して待ち続ける(他サイトからの妨害を通さない)", async () => {
@@ -146,6 +147,16 @@ describe("startLoginSession", () => {
     await expect(session.done).resolves.toEqual({ account: "me@example.com" });
   });
 
+  it("メールアドレスが取れなければ枠を作らずに失敗し、Drive API 未有効化なら有効化 URL を案内する", async () => {
+    const { fetchImpl } = googleFetch({ about: () => new Response(JSON.stringify({ error: { message: "disabled", errors: [{ reason: "accessNotConfigured" }] } }), { status: 403 }) });
+    const session = await startLoginSession({ creds, configDir: dir, fetchImpl, now: () => NOW, timeoutMs: 5_000 });
+    const failed = session.done.catch((e: unknown) => e as Error);
+    const state = new URL(session.url).searchParams.get("state");
+    expect((await fetch(`http://127.0.0.1:${session.port}/callback?code=C&state=${state}`)).status).toBe(500);
+    expect(((await failed) as Error).message).toMatch(/not saved.*Enable the Drive API/);
+    expect(existsSync(join(dir, "accounts"))).toBe(false);
+  });
+
   it("refresh_token が返らない交換は失敗として扱う", async () => {
     const { fetchImpl } = googleFetch({ token: () => new Response(JSON.stringify({ access_token: "acc", expires_in: 10 }), { status: 200 }) });
     const session = await startLoginSession({ creds, configDir: dir, fetchImpl, now: () => NOW, timeoutMs: 5_000 });
@@ -171,7 +182,7 @@ describe("refreshAccessToken / getAccessToken", () => {
   it("有効期限内の access_token はネットワークを使わずそのまま返す", async () => {
     saveToken(dir, { refresh_token: "ref", access_token: "acc", expires_at: NOW + 120_000 });
     const { fetchImpl, calls } = googleFetch();
-    const result = await getAccessToken(creds, dir, fetchImpl, () => NOW);
+    const result = await getAccessToken(creds, dir, fetchImpl, () => NOW, dir);
     expect(result?.accessToken).toBe("acc");
     expect(calls).toHaveLength(0);
   });
@@ -179,7 +190,7 @@ describe("refreshAccessToken / getAccessToken", () => {
   it("期限切れなら refresh し、保存し直す", async () => {
     saveToken(dir, { refresh_token: "ref", access_token: "old", expires_at: NOW + 10_000 });
     const { fetchImpl, calls } = googleFetch({ token: () => new Response(JSON.stringify({ access_token: "new", expires_in: 100 }), { status: 200 }) });
-    const result = await getAccessToken(creds, dir, fetchImpl, () => NOW);
+    const result = await getAccessToken(creds, dir, fetchImpl, () => NOW, dir);
     expect(result?.accessToken).toBe("new");
     expect(new URLSearchParams(calls[0]?.body).get("grant_type")).toBe("refresh_token");
     expect(loadToken(dir)).toMatchObject({ refresh_token: "ref", access_token: "new", expires_at: NOW + 100_000 });
@@ -187,7 +198,10 @@ describe("refreshAccessToken / getAccessToken", () => {
 
   it("invalid_client は再ログインでなくクライアント JSON の取り直しを案内する", async () => {
     const { fetchImpl } = googleFetch({ token: () => new Response(JSON.stringify({ error: "invalid_client", error_description: "The OAuth client was deleted." }), { status: 401 }) });
-    const error = await refreshAccessToken(creds, { refresh_token: "ref" }, fetchImpl, () => NOW, dir).catch((e: unknown) => e as DriveliftError);
+    const error = await refreshAccessToken(creds, { refresh_token: "ref" }, fetchImpl, () => NOW, dir).then(
+      () => expect.unreachable("refresh must fail"),
+      (e: unknown) => e as DriveliftError,
+    );
     expect(error).toBeInstanceOf(DriveliftError);
     expect(error.status?.state).toBe("token_invalid");
     expect(error.status?.next_steps.join("\n")).toMatch(/import_client_secret/);
@@ -201,6 +215,6 @@ describe("refreshAccessToken / getAccessToken", () => {
 
   it("token.json が無ければ null", async () => {
     const { fetchImpl } = googleFetch();
-    expect(await getAccessToken(creds, dir, fetchImpl, () => NOW)).toBeNull();
+    expect(await getAccessToken(creds, dir, fetchImpl, () => NOW, dir)).toBeNull();
   });
 });

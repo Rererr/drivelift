@@ -26,6 +26,8 @@ function deps(): Deps {
     downloadsDir: join(dir, "Downloads"),
     hasGcloud: () => false,
     execGcloud: async () => ({ code: 1, stdout: "", stderr: "not in tests" }),
+    cwd: dir,
+    gitOriginUrl: () => null,
   };
 }
 
@@ -37,10 +39,10 @@ async function connectedClient(): Promise<Client> {
 }
 
 describe("server.ts", () => {
-  it("ツールは6個", async () => {
+  it("ツールは7個", async () => {
     const client = await connectedClient();
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(["auth_start", "auth_status", "gcloud_setup", "import_client_secret", "status", "upload"]);
+    expect(tools.map((t) => t.name).sort()).toEqual(["auth_start", "auth_status", "gcloud_setup", "import_client_secret", "map_source", "status", "upload"]);
     await client.close();
   });
 
@@ -71,6 +73,16 @@ describe("server.ts", () => {
     const client = await connectedClient();
     const { tools } = await client.listTools();
     expect(tools.find((t) => t.name === "upload")?.annotations?.destructiveHint).toBe(true);
+    await client.close();
+  });
+
+  it("map_source は書き込むツールとして宣言し、枠が無ければ status と同じ理由で弾く", async () => {
+    const client = await connectedClient();
+    const { tools } = await client.listTools();
+    expect(tools.find((t) => t.name === "map_source")?.annotations?.readOnlyHint).toBe(false);
+    const result = await client.callTool({ name: "map_source", arguments: { account: "a@example.com", source: "github.com/org/a" } });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse((result.content as Array<{ type: string; text: string }>)[0]?.text ?? "")).toMatchObject({ error: "OAuth client is not configured.", state: "no_client" });
     await client.close();
   });
 

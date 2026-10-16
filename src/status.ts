@@ -7,9 +7,18 @@
  * ここは純粋関数のみで、実際の判定(ファイル・ネットワーク)は core.ts の handleStatus が行う。
  */
 import { clientSecretPath } from "./config.js";
+import type { Resolution } from "./source.js";
 
-export type StatusState = "no_client" | "no_token" | "token_invalid" | "api_disabled" | "ready";
+/** account_unresolved はトップレベルだけ(どの枠を使うか決まらない)。枠ごとの状態は残りの5つ。 */
+export type StatusState = "no_client" | "no_token" | "token_invalid" | "api_disabled" | "ready" | "account_unresolved";
 export type ClientSource = "env" | "file";
+
+export interface AccountSummary {
+  email: string;
+  state: Exclude<StatusState, "account_unresolved">;
+  sources: string[];
+  client_source: ClientSource | null;
+}
 
 export interface Status {
   state: StatusState;
@@ -24,6 +33,10 @@ export interface Status {
   candidates?: string[];
   /** no_client のとき、Console に入力する値のサンプル(next_steps と同じ内容の構造化版)。 */
   console_form?: ConsoleForm;
+  /** status のみ。ログイン済みの枠の一覧。 */
+  accounts?: AccountSummary[];
+  /** status のみ。cwd から解決したときに使われる枠(解決しなければ理由)。 */
+  resolved?: Resolution;
 }
 
 export interface NoClientContext {
@@ -108,7 +121,7 @@ export function noClientStatus(configDir: string, ctx: NoClientContext = { gclou
   };
 }
 
-export function noTokenStatus(configDir: string, clientSource: ClientSource): Status {
+export function noTokenStatus(configDir: string, clientSource: ClientSource | null): Status {
   return {
     state: "no_token",
     ready: false,
@@ -119,15 +132,56 @@ export function noTokenStatus(configDir: string, clientSource: ClientSource): St
     ],
     urls: {},
     config_dir: configDir,
+    ...(clientSource ? { client_source: clientSource } : {}),
+  };
+}
+
+/** 枠のトークンを発行したクライアントが手元に無い(env でログインした枠を環境変数なしで使う等)。 */
+export function accountClientMissingStatus(configDir: string, email: string, clientSource: ClientSource, accountDirPath: string): Status {
+  return {
+    state: "no_client",
+    ready: false,
+    message:
+      clientSource === "env"
+        ? `${email} signed in with the OAuth client from DRIVELIFT_CLIENT_ID / DRIVELIFT_CLIENT_SECRET, which are not set here.`
+        : `The copy of the OAuth client ${email} signed in with is missing (${clientSecretPath(accountDirPath)}).`,
+    next_steps: [
+      clientSource === "env" ? "Set DRIVELIFT_CLIENT_ID and DRIVELIFT_CLIENT_SECRET (e.g. in the env of .mcp.json), or sign in again as below." : "Sign in again as below.",
+      `${signInAgainStep(email)}. It uses the current OAuth client and replaces only this account's sign-in.`,
+    ],
+    urls: {},
+    config_dir: configDir,
     client_source: clientSource,
   };
+}
+
+/** 枠が2つ以上あり、どれで送るか決まらない。upload はこの状態で送らずに拒否する。 */
+export function accountUnresolvedStatus(configDir: string, reason: string): Status {
+  return {
+    state: "account_unresolved",
+    ready: false,
+    message: `Cannot tell which Google account to upload with: ${reason}.`,
+    next_steps: [
+      "Ask the user which account to use, then pass it as account to upload (CLI: --account <email>). Do not guess.",
+      "If the user wants uploads from here to always use that account, call map_source with the account and source (CLI: `drivelift map <email> [source]`). A source mapped to two accounts is ambiguous: remove one with remove: true.",
+      "To add another account, call auth_start with login_hint (CLI: `drivelift login --hint <email>`).",
+    ],
+    urls: {},
+    config_dir: configDir,
+  };
+}
+
+/** ログインし直す案内。枠が分かっていれば、その枠を選ばせる login_hint を付ける。 */
+function signInAgainStep(account: string | null): string {
+  return account ? `Call auth_start with login_hint: ${account} (CLI: \`drivelift login --hint ${account}\`)` : "Call auth_start (CLI: `drivelift login`)";
 }
 
 /**
  * errorCode は Google の OAuth エラーコード。invalid_client(クライアント削除・secret リセット)は
  * 再ログインしても直らないので、案内をクライアント JSON の取り直しに切り替える。
+ * account はトークンの枠(分からなければ null)。
  */
-export function tokenInvalidStatus(configDir: string, reason: string, errorCode: string | null = null): Status {
+export function tokenInvalidStatus(configDir: string, reason: string, errorCode: string | null = null, account: string | null = null): Status {
   if (errorCode === "invalid_client") {
     return {
       state: "token_invalid",
@@ -135,7 +189,7 @@ export function tokenInvalidStatus(configDir: string, reason: string, errorCode:
       message: `Google rejected the OAuth client itself (${reason}). The client may have been deleted or its secret reset; signing in again will not help until the client is fixed.`,
       next_steps: [
         `Open the OAuth clients page (${CONSOLE_URLS.create_oauth_client.replace(/\/create$/, "")}), download the JSON of a valid Desktop-app client (or create a new one), and import it with import_client_secret.`,
-        "Then call auth_start to sign in again.",
+        `Then sign in again: ${signInAgainStep(account)}.`,
       ],
       urls: { create_oauth_client: CONSOLE_URLS.create_oauth_client },
       config_dir: configDir,
@@ -146,7 +200,7 @@ export function tokenInvalidStatus(configDir: string, reason: string, errorCode:
     ready: false,
     message: `The stored token was rejected by Google (${reason}). Sign in again.`,
     next_steps: [
-      "Call auth_start (CLI: `drivelift login`) and finish the sign-in in the browser.",
+      `${signInAgainStep(account)} and finish the sign-in in the browser.`,
       `If this happens every 7 days, your consent screen is External + Testing: publish it to Production (${CONSOLE_URLS.consent_screen}) or, on Google Workspace, switch the user type to Internal.`,
     ],
     urls: { consent_screen: CONSOLE_URLS.consent_screen },
