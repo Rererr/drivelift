@@ -47,7 +47,7 @@ Ask your agent to call `status`; it returns exactly these steps.
    - Google Workspace account: choose **Internal** (no review, and no 7-day expiry of the Testing status)
    - Personal Gmail: choose **External** and **publish to Production**. In Testing status refresh tokens expire after 7 days
 4. Create an OAuth client of type **Desktop app** and download its JSON: https://console.cloud.google.com/auth/clients/create
-5. Put the JSON in place. When `status` finds a candidate in `~/Downloads` it returns a ready-made `mv … && chmod 600 …` command; run that. `import_client_secret` (CLI: `drivelift import-secret <path>`) does the same. Without a path it only lists candidates and copies nothing
+5. Import the JSON with `import_client_secret` (CLI: `drivelift import-secret <path>`). It validates the file and saves it to the config directory with mode 0600. Without a path it only lists the candidates in `~/Downloads`, newest first, and copies nothing (`status` / `doctor` also list them in `candidates`). Importing copies the file, so the original stays in `~/Downloads`; delete it yourself if you no longer need it
 6. Call `auth_start` (CLI: `drivelift login`) and finish the sign-in in the browser. The tool waits for the consent to complete, so there is no need to tell the agent afterwards. To use several Google accounts, see [Multiple Google accounts](#multiple-google-accounts)
 
 From then on, just call `upload`. Calling `upload` while something is missing returns the same steps as `next_steps`.

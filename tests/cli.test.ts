@@ -21,6 +21,21 @@ describe("cli", () => {
     rmSync(configDir, { recursive: true, force: true });
   });
 
+  it("doctor: no_client のとき ~/Downloads の候補を表示する", async () => {
+    const downloads = mkdtempSync(join(tmpdir(), "drivelift-dl-"));
+    const cand = join(downloads, "client_secret_abc.json");
+    writeFileSync(cand, "{}");
+    const deps = { ...defaultDeps(), downloadsDir: downloads, hasGcloud: () => false };
+    const out = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      expect(await main(["doctor"], deps)).toBe(2);
+      expect(out.mock.calls.map((c) => String(c[0])).join("")).toContain(`candidates (newest first):\n  ${cand}`);
+    } finally {
+      out.mockRestore();
+      rmSync(downloads, { recursive: true, force: true });
+    }
+  });
+
   it("--share は role:type[:target] を分解し、target の : は保つ", () => {
     expect(parseShareArg("reader:domain:example.com")).toEqual({ role: "reader", type: "domain", target: "example.com" });
     expect(parseShareArg("reader:anyone")).toEqual({ role: "reader", type: "anyone" });

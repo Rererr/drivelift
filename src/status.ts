@@ -99,10 +99,9 @@ export function noClientStatus(configDir: string, ctx: NoClientContext = { gclou
   const gcloudHint = ctx.gcloud
     ? ` — gcloud is installed: the gcloud_setup tool can do steps 1-2 for you (call it without confirm to see the commands, then with confirm: true after the user approves). Steps 3-4 have no gcloud equivalent.`
     : "";
-  const newest = ctx.candidates[0];
-  const step5 = newest
-    ? `5. A downloaded client JSON was found: ${newest}. Put it in place with \`mv "${newest}" "${secretPath}" && chmod 600 "${secretPath}"\` (or call import_client_secret with that path). ${ctx.candidates.length > 1 ? `${ctx.candidates.length} candidates exist; the newest is listed first in \`candidates\`. ` : ""}Alternatively set DRIVELIFT_CLIENT_ID and DRIVELIFT_CLIENT_SECRET.`
-    : `5. Save the JSON as ${secretPath} (e.g. \`mv ~/Downloads/client_secret_*.json "${secretPath}" && chmod 600 "${secretPath}"\`), or call import_client_secret with the downloaded file's path. Alternatively set DRIVELIFT_CLIENT_ID and DRIVELIFT_CLIENT_SECRET.`;
+  const step5 = ctx.candidates.length > 0
+    ? "5. A downloaded client JSON was found in ~/Downloads (see candidates, newest first). Confirm with the user which file to use, then call import_client_secret with its path (CLI: `drivelift import-secret <path>`). Alternatively set DRIVELIFT_CLIENT_ID and DRIVELIFT_CLIENT_SECRET."
+    : `5. Call import_client_secret with the downloaded JSON's path (CLI: \`drivelift import-secret <path>\`); it is saved as ${secretPath} (mode 0600). Alternatively set DRIVELIFT_CLIENT_ID and DRIVELIFT_CLIENT_SECRET.`;
   return {
     state: "no_client",
     ready: false,

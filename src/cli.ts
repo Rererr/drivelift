@@ -122,6 +122,7 @@ function formatStatus(status: Status): string {
     lines.push("", "next steps:");
     for (const step of status.next_steps) lines.push(`  ${step}`);
   }
+  if (status.candidates) lines.push("", "candidates (newest first):", ...status.candidates.map((c) => `  ${c}`));
   return lines.join("\n");
 }
 

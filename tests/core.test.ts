@@ -72,7 +72,7 @@ describe("handleStatus は導入状態を5段階で返す", () => {
     expect(status.console_form?.consent_screen.map((f) => f.field)).toEqual(["App name", "User support email", "User type", "Email addresses", "Agree to the Google API Services: User Data Policy"]);
   });
 
-  it("no_client: ~/Downloads に候補があれば mv コマンドと candidates を返し、gcloud があれば gcloud_setup を案内する", async () => {
+  it("no_client: ~/Downloads に候補があれば candidates に入れて import_client_secret へ案内し、gcloud があれば gcloud_setup を案内する", async () => {
     const downloads = join(dir, "Downloads");
     mkdirSync(downloads);
     const cand = join(downloads, "client_secret_abc.json");
@@ -81,8 +81,26 @@ describe("handleStatus は導入状態を5段階で返す", () => {
     const status = await handleStatus(deps);
     expect(status.candidates).toEqual([cand]);
     const text = status.next_steps.join("\n");
-    expect(text).toContain(`mv "${cand}" "${clientSecretPath(dir)}"`);
+    expect(text).toContain("import_client_secret");
     expect(text).toContain("gcloud_setup");
+  });
+
+  it("no_client: ~/Downloads のファイル名は candidates 以外に出さない(シェルを通る文字列に混ぜない)", async () => {
+    const downloads = join(dir, "Downloads");
+    mkdirSync(downloads);
+    const cand = join(downloads, "client_secret$(touch PWNED-7f3a)`id`; x '.json");
+    writeFileSync(cand, "{}");
+    const status = await handleStatus(makeDeps(dir, {}, () => undefined));
+    expect(status.candidates).toEqual([cand]);
+    expect(JSON.stringify({ ...status, candidates: undefined })).not.toContain("PWNED-7f3a");
+  });
+
+  it("no_client: 候補の有無にかかわらず next_steps にシェルコマンドを含めない", async () => {
+    const without = await handleStatus(makeDeps(dir, {}, () => undefined));
+    mkdirSync(join(dir, "Downloads"));
+    writeFileSync(join(dir, "Downloads", "client_secret_abc.json"), "{}");
+    const withCandidate = await handleStatus(makeDeps(dir, {}, () => undefined));
+    for (const status of [without, withCandidate]) expect(status.next_steps.join("\n")).not.toMatch(/\b(mv|cp|chmod)\b/);
   });
 
   it("no_token: クライアントはあるがログイン前", async () => {
