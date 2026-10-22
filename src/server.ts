@@ -58,7 +58,7 @@ export function createServer(deps: Deps = defaultDeps()): McpServer {
         "Report whether drivelift can upload to Google Drive right now. Returns state (no_client / no_token / token_invalid / api_disabled / ready, or account_unresolved when several accounts are signed in and none is mapped to the working directory, when DRIVELIFT_ACCOUNT names an account that is not signed in, or when git cannot read the working directory's repository), " +
         "accounts (each signed-in account with its own state and mapped sources), resolved (the account an upload from the working directory would use, or why none), " +
         "a message, next_steps, and urls. When not ready, relay next_steps to the user verbatim — they contain the exact Google Cloud Console links, " +
-        "a gcloud_setup hint when gcloud is installed, and a ready-made mv command when a downloaded client JSON is found in ~/Downloads. " +
+        "and a gcloud_setup hint when gcloud is installed. When client JSON files are found in ~/Downloads they are listed in candidates (newest first): pass the one the user picks to import_client_secret as path; do not build shell commands from these file names. " +
         "console_form lists sample values for every Console field in steps 3-4; show it to the user as a table so they can fill the forms without guessing. " +
         "drivelift uses a bring-your-own OAuth client (Desktop app type) and the drive.file scope only.",
       inputSchema: z.object({}),

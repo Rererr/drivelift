@@ -47,7 +47,7 @@ Node.js 22.13 以降が必要。
    - Google Workspace のアカウントなら **内部**（審査不要。テスト状態の7日失効も起きない）
    - 個人 Gmail なら **外部** にして **本番に公開**する。テスト状態のままだとリフレッシュトークンが 7 日で失効する
 4. OAuth クライアントを **デスクトップ アプリ** 種別で作り、JSON をダウンロード: https://console.cloud.google.com/auth/clients/create
-5. JSON を所定の場所に置く。`status` が `~/Downloads` の候補を見つけると `mv … && chmod 600 …` のコマンドをそのまま返すので、それを実行すればよい。`import_client_secret` ツール（CLI: `drivelift import-secret <path>`）でも同じことができる。パスを省くと候補を列挙するだけで、コピーはしない
+5. JSON を `import_client_secret` ツール（CLI: `drivelift import-secret <path>`）で取り込む。中身を検証して設定ディレクトリへ 0600 で保存する。パスを省くと `~/Downloads` の候補を新しい順に列挙するだけで、コピーはしない（`status` / `doctor` も候補を `candidates` に出す）。取り込みはコピーなので、`~/Downloads` の元ファイルは残る。不要なら自分で消す
 6. `auth_start` ツール（CLI: `drivelift login`）でブラウザが開くのでログインする。ツールは同意が終わるまで待つので、終わったことを伝え直す必要はない。複数の Google アカウントを使うときは「[複数の Google アカウント](#複数の-google-アカウント)」を参照
 
 以後は `upload` を呼ぶだけ。設定が欠けた状態で `upload` を呼んでも、同じ手順が `next_steps` として返る。

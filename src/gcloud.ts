@@ -77,7 +77,7 @@ function projectUrls(projectId: string, account: string | null): { consent_scree
 function remainingSteps(projectId: string, account: string | null, secretPath: string): string[] {
   return [
     ...consoleSteps(projectUrls(projectId, account), account),
-    `5. Put the JSON at ${secretPath} (status returns a ready-made mv command once it is in ~/Downloads), then call auth_start.`,
+    `5. Import the JSON with import_client_secret (it is saved as ${secretPath}; status lists the files in ~/Downloads in candidates), then call auth_start.`,
     ...(account ? [`If the Console says you lack permissions, it is open with a different Google account: switch to ${account} (the links already pin it with authuser).`] : []),
   ];
 }
