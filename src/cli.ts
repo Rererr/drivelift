@@ -104,6 +104,11 @@ export function parseShareArg(arg: string): ShareSpec {
   return { role: role as ShareSpec["role"], type: type as ShareSpec["type"], ...(target ? { target } : {}) };
 }
 
+/** 案内するコマンドの引数を POSIX シェル向けに単一引用符で包む。到達元は git remote やディレクトリ名から来るので `$(...)` を含みうる。 */
+function shellArg(value: string): string {
+  return /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 function formatStatus(status: Status): string {
   const lines = [`state: ${status.state}`, status.message];
   if (status.account) lines.push(`account: ${status.account}`);
@@ -232,7 +237,7 @@ export async function main(argv: string[], deps: Deps = defaultDeps()): Promise<
         // 意図した挙動だが、フォルダの URL を渡しても相手は開けないので知らせる
         if (values["share-new-folder"] && result.folder_shared.length === 0) process.stderr.write("folder not shared: the --folder-path folder already existed, and drivelift never shares a reused folder (share it in Drive if needed)\n");
         if (result.mapped_to) process.stderr.write(`note: uploaded with ${result.account} as given by --account, but this source is mapped to ${result.mapped_to}.\n`);
-        if (result.suggest_map) process.stderr.write(`${result.suggest_map.source} is not mapped to any account. To use ${result.suggest_map.account} from here without --account: drivelift map ${result.suggest_map.account} ${result.suggest_map.source}\n`);
+        if (result.suggest_map) process.stderr.write(`${result.suggest_map.source} is not mapped to any account. To use ${result.suggest_map.account} from here without --account: drivelift map ${shellArg(result.suggest_map.account)} ${shellArg(result.suggest_map.source)}\n`);
         return failedShares.length + failedFolderShares.length > 0 ? 3 : 0;
       }
       case "map": {
@@ -245,7 +250,7 @@ export async function main(argv: string[], deps: Deps = defaultDeps()): Promise<
           process.stdout.write(`sources of ${result.account}: ${result.sources.length > 0 ? result.sources.join(", ") : "-"}\n`);
           return 0;
         }
-        process.stdout.write(`Re-run to ${values.remove ? "unmap" : "map"} it: drivelift map ${result.account} ${result.source}${values.remove ? " --remove" : ""}\n`);
+        process.stdout.write(`Re-run to ${values.remove ? "unmap" : "map"} it: drivelift map ${shellArg(result.account)} ${shellArg(result.source)}${values.remove ? " --remove" : ""}\n`);
         return 2;
       }
       default:

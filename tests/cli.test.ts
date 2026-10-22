@@ -36,6 +36,18 @@ describe("cli", () => {
     }
   });
 
+  it("map: 到達元に shell の特殊文字があれば、案内するコマンドで単一引用符に包む", async () => {
+    saveAccount(configDir, "me@example.com", { refresh_token: "ref" }, { clientId: "cid", clientSecret: "csec", source: "file" });
+    const deps = { ...defaultDeps(), gitOriginUrl: () => "https://gh.example/org/$(touch x)'q.git" };
+    const out = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      expect(await main(["map", "me@example.com"], deps)).toBe(2);
+      expect(out.mock.calls.map((c) => String(c[0])).join("")).toContain(`Re-run to map it: drivelift map me@example.com 'gh.example/org/$(touch x)'\\''q'\n`);
+    } finally {
+      out.mockRestore();
+    }
+  });
+
   it("--share は role:type[:target] を分解し、target の : は保つ", () => {
     expect(parseShareArg("reader:domain:example.com")).toEqual({ role: "reader", type: "domain", target: "example.com" });
     expect(parseShareArg("reader:anyone")).toEqual({ role: "reader", type: "anyone" });

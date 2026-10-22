@@ -100,7 +100,7 @@ drivelift upload <file> [--account EMAIL] [--folder ID] [--folder-path A/B] [--n
 drivelift map <email> [source] [--remove]  到達元をアカウントに対応づける（source を省くと作業ディレクトリの到達元を表示するだけ）
 ```
 
-`upload` は既定で URL だけを標準出力に出すので、スクリプトから拾いやすい。`--share` は繰り返し指定できる（例: `--share reader:domain:example.com --share writer:user:alice@example.com`）。共有に1件でも失敗すると（`--share-new-folder` によるフォルダの共有を含む）、URL は出したうえで終了コード 3 を返す。`--share-new-folder` を付けたのにフォルダが既存だった場合は、共有しなかったことを標準エラーに出す（終了コードは 0）。アカウントが決まらずに拒否したときは終了コード 2。`--account` で送ったとき、到達元の git リポジトリがどのアカウントにも対応づいていなければ、対応づける `drivelift map` のコマンドを標準エラーに出す。到達元が別のアカウントに対応づいていれば、そのことを標準エラーに出す（送信はする）。
+`upload` は既定で URL だけを標準出力に出すので、スクリプトから拾いやすい。`--share` は繰り返し指定できる（例: `--share reader:domain:example.com --share writer:user:alice@example.com`）。共有に1件でも失敗すると（`--share-new-folder` によるフォルダの共有を含む）、URL は出したうえで終了コード 3 を返す。`--share-new-folder` を付けたのにフォルダが既存だった場合は、共有しなかったことを標準エラーに出す（終了コードは 0）。アカウントが決まらずに拒否したときは終了コード 2。`--account` で送ったとき、到達元の git リポジトリがどのアカウントにも対応づいていなければ、対応づける `drivelift map` のコマンドを標準エラーに出す（シェルの特殊文字を含む引数は単一引用符で囲む）。到達元が別のアカウントに対応づいていれば、そのことを標準エラーに出す（送信はする）。
 
 ## 設定
 
